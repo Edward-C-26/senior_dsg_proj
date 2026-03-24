@@ -1,0 +1,91 @@
+FormatStyle: file
+
+# Checks: [
+#     -*,
+#     clang-analyzer-*,
+#     clang-diagnostic-*,
+#     bugprone-*,
+#     misc-*,
+#     performance-*,
+#     portability-*,
+#     readability-*,
+#     -bugprone-easily-swappable-parameters,
+#     # -readability-braces-around-statements,
+#     -readability-function-cognitive-complexity,
+#     -performance-no-int-to-ptr,
+# ]
+
+Checks: [
+    -*,
+    clang-diagnostic-*,
+    clang-analyzer-*,
+    bugprone-*,
+    cppcoreguidelines-*,
+    readability-*,
+    misc-*,
+    performance-*,
+    portability-*,
+    -cppcoreguidelines-avoid-non-const-global-variables,
+    -bugprone-easily-swappable-parameters,
+    -readability-function-cognitive-complexity,
+    -cppcoreguidelines-macro-to-enum,
+    -performance-no-int-to-ptr,
+    -cppcoreguidelines-avoid-magic-numbers
+]
+
+# Use this line to only display warnings about identifier naming violations (useful for refactoring an existing codebase)
+# Checks: "-*,readability-identifier-naming"
+
+CheckOptions:
+    readability-function-size.LineThreshold: 100
+
+    readability-magic-numbers.IgnorePowersOf2IntegerValues: true
+    readability-magic-numbers.IgnoredIntegerValues: [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, -1,
+        0xF, 0xF0, 0xF00, 0xF000, 0xF0000, 0xF00000, 0xF000000, 0xF0000000,
+        0xFF, 0xFFFF, 0xFFFFFFFF, 0xFF00, 0xFF0000, 0xFF000000, 0xFFFF0000
+    ]
+    
+    readability-identifier-length.IgnoredVariableNames: '(id|ID|i|j|k)'
+    readability-identifier-length.IgnoredParameterNames: '(id|ID|i|j|k)'
+
+    # Identifier naming checks
+    readability-identifier-naming.ConstantCase: UPPER_CASE
+    readability-identifier-naming.MacroDefinitionCase: UPPER_CASE
+
+    readability-identifier-naming.FunctionCase: lower_case
+    readability-identifier-naming.VariableCase: lower_case
+    readability-identifier-naming.GlobalVariableCase: lower_case
+    readability-identifier-naming.LocalVariableCase: lower_case
+    readability-identifier-naming.StructCase: lower_case
+    readability-identifier-naming.ParameterCase: lower_case
+    readability-identifier-naming.MemberCase: lower_case
+    readability-identifier-naming.LocalPointerCase: lower_case
+    readability-identifier-naming.GlobalPointerCase: lower_case
+    readability-identifier-naming.PointerParameterCase: lower_case
+    readability-identifier-naming.ConstantPointerParameterCase: lower_case
+
+    readability-identifier-naming.TypedefCase: Camel_Snake_Case
+
+    readability-identifier-naming.TypedefSuffix: _t
+
+    readability-identifier-naming.GlobalVariablePrefix: g_
+    readability-identifier-naming.GlobalPointerPrefix: g_
+
+
+
+
+    # == Uncomment the lines below to enable checks for _ptr pointer suffix ==
+    # readability-identifier-naming.LocalPointerSuffix: _ptr
+    # readability-identifier-naming.PointerParameterSuffix: _ptr
+    # readability-identifier-naming.ConstantPointerParameterSuffix: _ptr
+
+    # Ignore lower_snake_case pointer names meeting any of these conditions:
+    # Ends with _hdl (for FreeRTOS handles)
+    # Starts with h, no underscores (STM32 HAL peripheral handle naming convention, eg. hfdcan2, hcrc, etc.)
+    # Ends with cb or callback (pointer parameters only, for callback function pointers)
+    # == Uncomment the lines below to enable these exceptions to the _ptr suffix rule ==
+    # readability-identifier-naming.LocalPointerIgnoredRegexp: 'h[a-z0-9]+|[a-z0-9_]+_hdl'
+    # readability-identifier-naming.PointerParameterIgnoredRegexp: 'h[a-z0-9]+|[a-z0-9_]+_hdl|[a-z0-9_]*(cb|callback)'
+    # readability-identifier-naming.ConstantPointerParameterIgnoredRegexp: 'h[a-z0-9]+|[a-z0-9_]+_hdl|[a-z0-9_]*(cb|callback)'
+    # readability-identifier-naming.GlobalPointerIgnoredRegexp: '(h[a-z0-9]+|[a-z0-9_]+_hdl)_g'

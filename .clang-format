@@ -1,0 +1,31 @@
+BasedOnStyle: Google
+
+ColumnLimit: 125
+IndentWidth: 4
+# ContinuationIndentWidth: 4
+MaxEmptyLinesToKeep: 2
+
+AllowShortIfStatementsOnASingleLine: true
+
+Cpp11BracedListStyle: false
+
+AlignConsecutiveMacros: AcrossComments
+AlignConsecutiveBitFields: AcrossComments
+AlignAfterOpenBracket: DontAlign
+
+# AlignArrayOfStructures: Right 
+# Unfortunately, this results in some messed-up struct initializer lists :(
+# .hfdcan = {       &hfdcan1, NULL,       &hfdcan3 },
+# .rx_location = { FDCAN_RX_FIFO0,    0, FDCAN_RX_FIFO1 },
+# TODO: see if there's a workaround
+
+
+# Add a trailing comma after the last element in a struct initializer list for block indentation
+BinPackParameters: false
+BinPackArguments: false
+
+SortIncludes: false
+
+IndentPPDirectives: BeforeHash
+
+# WIP!

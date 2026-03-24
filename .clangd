@@ -1,0 +1,27 @@
+# clangd version 18.1.8
+
+CompileFlags:
+    Add: [
+        -Wall
+    ]
+    CompilationDatabase: .
+
+Index:
+    Background: Build
+
+Diagnostics:
+    Suppress: [readability-identifier-naming, readability-magic-numbers]
+    ClangTidy:
+        FastCheckFilter: None
+    UnusedIncludes: None
+    Includes: 
+        IgnoreHeader: [stm32.*\.h$, std.*\.h]
+
+---
+# Disable readability diagnostics on files that we didn't write or that require a specific format/include generated code 
+If:
+    PathMatch: [Drivers/.*]
+Diagnostics:
+    ClangTidy:
+        Remove: readability-*
+    

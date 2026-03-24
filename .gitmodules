@@ -1,0 +1,3 @@
+[submodule "bms_2025/lib/can"]
+	path = bms_2025/lib/can
+	url = https://gitlab.illinielectricmotorsports.com/iem/software/can-lib.git

@@ -1,0 +1,12 @@
+-Wall
+-Wextra
+-Ibms_2025/Core/Inc
+-Ibms_2025/Drivers/STM32F4xx_HAL_Driver/Inc
+-Ibms_2025/Drivers/STM32F4xx_HAL_Driver/Inc/Legacy
+-Ibms_2025/Drivers/CMSIS/Device/ST/STM32F4xx/Include
+-Ibms_2025/Drivers/CMSIS/Include
+-Ibms_2025/lib/can/can_codec/inc
+-DUSE_PWR_LDO_SUPPLY
+-DUSE_HAL_DRIVER 
+-DSTM32F446xx
+-DDEBUG

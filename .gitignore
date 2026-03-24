@@ -1,0 +1,86 @@
+# General
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Icon must end with two \r
+Icon
+
+
+# Thumbnails
+._*
+
+# Files that might appear in the root of a volume
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Directories potentially created on remote AFP share
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Windows default autosave extension
+*.asv
+
+# OSX / *nix default autosave extension
+*.m~
+
+# Compiled MEX binaries (all platforms)
+*.mex*
+
+# Packaged app and toolbox files
+*.mlappinstall
+*.mltbx
+
+# Generated helpsearch folders
+helpsearch*/
+
+# Simulink code generation
+slprj/
+sccprj/
+.bin
+.elf
+.hex
+
+# Matlab code generation folders
+codegen/
+resources/
+# .gitattributes
+
+# Simulink autosave extension
+*.autosave
+
+# Simulink cache files
+*.slxc
+
+# Octave session info
+octave-workspace
+
+.vscode
+
+# eclipse specific git ignore
+.metadata/
+RemoteSystemsTempFiles/
+.settings/
+*.launch
+
+# STM32 git ignore
+*.mxproject
+
+# Output Files
+*.o
+
+# Doxygen output
+html
+latex
+
+# Build artifacts
+Debug/
+Release/
