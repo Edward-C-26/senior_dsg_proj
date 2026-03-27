@@ -6,10 +6,11 @@
 #include "stdlib.h"
 #include "string.h"
 
-// 12 cells per pack, 6 packs, 4 temps per board
-#define NUM_CELLS	72
-#define NUM_BOARDS	6
-#define NUM_TEMPS	4
+// TODO: NEED TO UPDATE THESE VALUES BASED ON FINAL HARDWARE DESIGN
+// 6 cells per pack, 1 packs, 3 temps per board
+#define NUM_CELLS	6
+#define NUM_BOARDS	1
+#define NUM_TEMPS	2
 
 typedef struct {
 	// General BMS configuration

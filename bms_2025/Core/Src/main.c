@@ -1,76 +1,67 @@
-
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  */
 /* USER CODE END Header */
+
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "stm32f4xx.h"
 #include "stm32f4xx_hal.h"
+#include "stm32f4xx_hal_uart.h"
+#include "stm32f4xx_hal_gpio.h"
+#include "stm32f4xx_hal_spi.h"
+#include "stm32f4xx_hal_tim.h"
+#include "stm32f4xx_hal_rcc.h"
+#include "stm32f4xx_hal_cortex.h"
+#include "stm32f4xx_hal_pwr.h"
 
 #include "BMSconfig.h"
 #include "Fault.h"
 #include "LTC6811.h"
 #include "PackCalculations.h"
 #include "SPI.h"
-#include "isoADC.h"
-
-#include "can_1.h"
-#include "can_2.h"
-#include "stm32f4xx_hal_can.h"
-#include "stm32f4xx_hal_gpio.h"
-
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define CHARGER_OUT_ID 0x405
-#define CAN_RX_MAILBOX_SIZE 3
+#define NUM_USED_CELLS               6U
+#define NUM_USED_THERMISTORS         2U
+#define VOLTAGE_POLL_PERIOD_MS       200U
+#define TEMP_POLL_PERIOD_MS          500U
+#define HEARTBEAT_PERIOD_MS          250U
 
-#define CHARGER_IN_ID 0x1806E5F4	// charger CAN ID is 0x1806E5F4
-#define CHARGER_INFO_ID 0x700
-#define CONSTANT_CAN_ENABLE 0
+#define DEFAULT_CELL_OV_THRESHOLD    42000U
+#define DEFAULT_CELL_UV_THRESHOLD    30000U
+#define DEFAULT_BALANCE_THRESHOLD    41500U
+#define DEFAULT_MAX_DISCHARGE_CELLS  1U
+#define DEFAULT_CELL_IMBALANCE_LIMIT 150U
 
-#define BMS_RX_MSG_ID 0x0300
-#define BMS_RX_MSG_MASK 0x0F00
-
-
-#define BALANCE_EN  0
-
-// STM manual balancing
-#define THRESHOLD_BALANCE_EN 0
-#define DISCHARGE_THRESHOLD 65535 // well above cell max voltage LOOK AT ACTUAL FUNCTION CALL FOR THRESHOLD SETTING
-
-// CAN Manual Balancing
-#define MANUAL_BALANCING_ID 0x381 // TODO
-
-// CAN transmit timeout (ms)
-// Assuming a 0% bus load 500kbit/s CAN bus, 5ms would be enough time to send ~23 8 byte CAN messages
-// If we hit the 5ms timeout without transmitting any pending messages, we're either at an extremely high bus load
-// and losing arbitration or there's some other issue (bus disconnected, no termination, etc.)
-#define CAN_TX_TIMEOUT 2
-
+#define UART_TX_PERIOD_MS            200U
+#define UART_BMS_PACKET_SOF1         0xAAU
+#define UART_BMS_PACKET_SOF2         0x55U
 
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-CAN_HandleTypeDef hcan1;
-CAN_HandleTypeDef hcan2;
-
 SPI_HandleTypeDef hspi1;
 SPI_HandleTypeDef hspi2;
 SPI_HandleTypeDef hspi3;
@@ -81,306 +72,294 @@ TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim7;
 TIM_HandleTypeDef htim13;
 
+UART_HandleTypeDef huart2;
+static uint32_t last_uart_tx_ms = 0U;
+
 /* USER CODE BEGIN PV */
-SPI_HandleTypeDef *ltc_spi = &hspi1;
-
-CAN_TxHeaderTypeDef tx_header;
-volatile CAN_RxHeaderTypeDef rx_header;
-uint8_t tx_data[8];
-volatile uint8_t rx_data[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-uint32_t tx_mailbox;
-
-CAN_TxHeaderTypeDef charger_tx_header;
-uint8_t charger_tx_data[8];
-uint8_t charge_rate = 2;
-uint8_t global_error_count = 0;
-uint8_t balance_counter = 0;
-uint8_t charging_msg_timeout = 1;
-
-int16_t poll_cell_temps = 0;
-int16_t poll_cell_voltages = 0;
-
-bool CHARGE_EN = 0;
-
 CellData bmsData[NUM_CELLS];
-static_assert(NUM_CELLS <= 144, "NUM_CELLS must not exceed array size");
 uint8_t BMS_STATUS[6];
 bool discharge[NUM_BOARDS][12];
-bool full_discharge[NUM_BOARDS][12];
 
-volatile manual_balancing_t manual_balancing_config;
-volatile bool bmsFault;
+volatile bool bmsFault = false;
 
-SPI_HandleTypeDef* isoADC_SPI_ptr_g = &hspi2;
-GPIO_TypeDef* isoADC_SPI_cs_port_ptr_g = SPI_ADC_CS_GPIO_Port;
-uint16_t isoADC_SPI_cs_pin_g = GPIO_PIN_12;
-TIM_HandleTypeDef* isoADC_PWM_ptr_g = &htim3;
-uint32_t isoADC_PWM_ch_g = TIM_CHANNEL_1;
 BMS_critical_info_t BMSCriticalInfo;
-uint8_t isoADC_rdy_status = 0, isoADC_period_miss = 0, max_isoADC_period = 0;
-uint32_t cell_volt_timing = 0, cell_temp_timing = 0, volt_start_time = 0, temp_start_time = 0;
+static BMSConfigStructTypedef BMSConfig;
 
-volatile bool pollingFlag = false;
-volatile uint8_t new_balance_msg = 0, can_tx_phase = 0;
-volatile uint8_t balancing_data_array[8];
-
-
-uint32_t prevTime = 0, timeBetween = 0;
-int32_t fault_timer = 2000;
-uint8_t error_cnt = 0, error_voltage_read_count = 0, error_temp_read_count = 0;
-
-float live_pack_voltage = 0, live_pack_current = 0;
-bool live_precharge = false;
-
-
+static uint32_t last_voltage_poll_ms = 0U;
+static uint32_t last_temp_poll_ms = 0U;
+static uint32_t last_heartbeat_ms = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_CAN1_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_SPI2_Init(void);
 static void MX_SPI3_Init(void);
+static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
-static void MX_CAN2_Init(void);
-static void MX_TIM1_Init(void);
 static void MX_TIM7_Init(void);
 static void MX_TIM13_Init(void);
-/* USER CODE BEGIN PFP */
-static bool transmit_can_message(CAN_HandleTypeDef* hcan, const CAN_TxHeaderTypeDef *tx_header, const uint8_t msg_data[]);
-static void transmit_cell_data_msg(CellData const bmsData[NUM_CELLS]);
-static void transmit_bms_status_msg(BMS_critical_info_t const *bms, uint8_t const bmsStatus[6]);
-static void transmit_cell_vlt_msg(BMS_critical_info_t const *bms);
-static void transmit_cell_temp_msg(BMS_critical_info_t const *bms);
-// void PACKSTAT_message(BMSConfigStructTypedef cfg, BMS_critical_info_t bms, uint8_t bmsData[NUM_CELLS][6]); // old method 
-// static void PACKSTAT_message(BMS_critical_info_t const *bms); // draft :D
 
-// Manual Charging/Balancing Functions
-void CHARGER_message();
-void resetChargerVariables();
-void process_balancing_msg();
+/* USER CODE BEGIN PFP */
+static void clear_all_discharge_requests(bool discharge_matrix[NUM_BOARDS][12]);
+static void stop_all_balancing(BMSConfigStructTypedef *cfg, bool discharge_matrix[NUM_BOARDS][12]);
+static bool pack_is_safe_for_discharge(const uint8_t status[6]);
+static uint16_t get_cell_imbalance_counts(const BMS_critical_info_t *bms);
+static void poll_cell_voltages_once(void);
+static void poll_cell_temps_once(void);
+static void refresh_fault_state(void);
+static void handle_balancing(void);
+static void heartbeat_task(void);
+
+static void MX_USART2_UART_Init(void);
+static uint16_t crc16_ccitt(const uint8_t *data, uint16_t length);
+static void build_display_temperatures_cC(int16_t temp_display_cC[NUM_USED_CELLS]);
+static void uart_send_bms_telemetry(void);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+/*
+ * Clear the software-side discharge request matrix.
+ *
+ * Balancing decisions are built in this local array first, then copied into
+ * the LTC6811 configuration when it is time to push an update to the board.
+ */
+static void clear_all_discharge_requests(bool discharge_matrix[NUM_BOARDS][12])
+{
+  uint8_t board;
+  uint8_t cell;
+
+  for (board = 0U; board < NUM_BOARDS; board++) {
+      for (cell = 0U; cell < 12U; cell++) {
+        discharge_matrix[board][cell] = false;
+      }
+  }
+}
+
+/*
+ * Shut balancing off immediately and push that state out to the monitor IC.
+ *
+ * This is the safe fallback whenever the pack is faulted or otherwise not in a
+ * condition where passive discharge should be active.
+ */
+static void stop_all_balancing(BMSConfigStructTypedef *cfg, bool discharge_matrix[NUM_BOARDS][12])
+{
+  clear_all_discharge_requests(discharge_matrix);
+  (void)dischargeCellGroups(cfg, discharge_matrix);
+}
+
+/*
+ * Interpret the current packed fault-byte format as a simple discharge-safe or
+ * discharge-unsafe decision.
+ *
+ * For this project, any OV, UV, OT, or UT condition blocks balancing.
+ */
+static bool pack_is_safe_for_discharge(const uint8_t status[6])
+{
+  const bool ov = ((status[0] & 0x01U) != 0U);
+  const bool uv = ((status[0] & 0x02U) != 0U);
+  const bool ot = ((status[0] & 0x04U) != 0U);
+  const bool ut = ((status[0] & 0x08U) != 0U);
+
+  return !(ov || uv || ot || ut);
+}
+
+/*
+ * Compute the present voltage spread between the highest and lowest cells.
+ *
+ * The check against an inverted min/max pair protects against startup cases
+ * where the extrema have not been populated with valid readings yet.
+ */
+static uint16_t get_cell_imbalance_counts(const BMS_critical_info_t *bms)
+{
+  if (bms->curr_max_voltage < bms->curr_min_voltage) {
+      return 0U;
+  }
+
+  return (uint16_t)(bms->curr_max_voltage - bms->curr_min_voltage);
+}
+
+/*
+ * Poll the voltage channels on the secondary board and immediately refresh the
+ * pack-level voltage summary derived from those readings.
+ */
+static void poll_cell_voltages_once(void)
+{
+  (void)poll_single_secondary_voltage_reading(0U, &BMSConfig, bmsData);
+  setCriticalVoltages(&BMSCriticalInfo, bmsData);
+}
+
+/*
+ * Poll the temperature channels on the secondary board and refresh the pack's
+ * temperature extrema based on the returned values.
+ */
+static void poll_cell_temps_once(void)
+{
+  (void)poll_single_secondary_temp_reading(0U, &BMSConfig, bmsData);
+  setCriticalTemps(&BMSCriticalInfo, bmsData);
+}
+
+/*
+ * Re-run the fault evaluation and mirror that result onto the board fault pin.
+ *
+ * This keeps both the software fault state and the hardware fault output in
+ * sync with the latest measurements.
+ */
+static void refresh_fault_state(void)
+{
+  bmsFault = FAULT_check(&BMSCriticalInfo, &BMSConfig, BMS_STATUS);
+
+  if (bmsFault) {
+      HAL_GPIO_WritePin(BMS_FLT_EN_GPIO_Port, BMS_FLT_EN_Pin, GPIO_PIN_SET);
+  } else {
+      HAL_GPIO_WritePin(BMS_FLT_EN_GPIO_Port, BMS_FLT_EN_Pin, GPIO_PIN_RESET);
+  }
+}
+
+/*
+ * Decide whether balancing should be running right now and, if it should, send
+ * the updated discharge pattern to the LTC6811.
+ *
+ * Balancing is only allowed when the pack is healthy enough for discharge and
+ * the voltage spread is large enough to justify doing anything at all.
+ */
+static void handle_balancing(void)
+{
+  const uint16_t imbalance = get_cell_imbalance_counts(&BMSCriticalInfo);
+
+  if ((!pack_is_safe_for_discharge(BMS_STATUS)) || bmsFault ||
+      (imbalance < DEFAULT_CELL_IMBALANCE_LIMIT)) {
+      stop_all_balancing(&BMSConfig, discharge);
+      return;
+  }
+
+  thresholdBalance(&BMSConfig, &BMSCriticalInfo, bmsData, discharge, DEFAULT_BALANCE_THRESHOLD, DEFAULT_MAX_DISCHARGE_CELLS);
+
+  (void)dischargeCellGroups(&BMSConfig, discharge);
+}
+
+/*
+ * Blink the debug LED as a visible heartbeat from the main loop.
+ *
+ * When this LED keeps toggling, it is a quick sign that the firmware is still
+ * cycling through its normal background tasks.
+ */
+static void heartbeat_task(void)
+{
+  HAL_GPIO_TogglePin(DEBUG_LED_GPIO_Port, DEBUG_LED_Pin);
+}
+
+static void MX_USART2_UART_Init(void)
+{
+    huart2.Instance = USART2;
+    huart2.Init.BaudRate = 115200;
+    huart2.Init.WordLength = UART_WORDLENGTH_8B;
+    huart2.Init.StopBits = UART_STOPBITS_1;
+    huart2.Init.Parity = UART_PARITY_NONE;
+    huart2.Init.Mode = UART_MODE_TX_RX;
+    huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+
+    if (HAL_UART_Init(&huart2) != HAL_OK) {
+        Error_Handler();
+    }
+}
+
 /* USER CODE END 0 */
 
-/**
-  * @brief  The application entry point.
-  * @retval int
-  */
+/*
+ * Bring up the MCU, initialize the peripherals this firmware uses, load the
+ * BMS configuration, and then stay in the background polling loop.
+ *
+ * The loop is intentionally straightforward: sample voltages, sample
+ * temperatures, refresh faults, and let the balancing logic make decisions
+ * based on the newest data.
+ */
 int main(void)
 {
-
-  /* USER CODE BEGIN 1 */
-
-  /* USER CODE END 1 */
-
-  /* MCU Configuration--------------------------------------------------------*/
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
-
-  /* USER CODE BEGIN Init */
-    BMSConfigStructTypedef BMSConfig;
-
-  /* USER CODE END Init */
-
-  /* Configure the system clock */
   SystemClock_Config();
 
-  /* USER CODE BEGIN SysInit */
-
-  /* USER CODE END SysInit */
-
-  /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_CAN1_Init();
   MX_SPI1_Init();
   MX_SPI2_Init();
   MX_SPI3_Init();
+  MX_TIM1_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
-  MX_CAN2_Init();
-  MX_TIM1_Init();
   MX_TIM7_Init();
   MX_TIM13_Init();
+
   /* USER CODE BEGIN 2 */
-    initPECTable();
-    loadConfig(&BMSConfig);
-    init_BMS_info(&BMSCriticalInfo);
-    resetChargerVariables();
+  initPECTable();
+  loadConfig(&BMSConfig);
+  apply_project35_config_overrides(&BMSConfig);
+  init_BMS_info(&BMSCriticalInfo);
 
-    // wake up isoADC
-    HAL_GPIO_WritePin(DEBUG_LED_GPIO_Port, DEBUG_LED_Pin, GPIO_PIN_RESET);
-    isoADC_rdy_status = wakeup_isoADC(&gIsoADCConfig, &gIsoADCData);
+  clear_all_discharge_requests(discharge);
+  (void)memset(BMS_STATUS, 0, sizeof(BMS_STATUS));
+  (void)memset(bmsData, 0, sizeof(bmsData));
 
-    // turn on timer interrupt for isoADC 128Hz
-    HAL_TIM_Base_Start_IT(&htim1);
-    // Sending CAN messages
-    HAL_TIM_Base_Start_IT(&htim7);
-    // Sending cell polling message
-    HAL_TIM_Base_Start_IT(&htim13);
+  writeConfigAll(&BMSConfig);
 
+  last_voltage_poll_ms = HAL_GetTick();
+  last_temp_poll_ms = HAL_GetTick();
+  last_heartbeat_ms = HAL_GetTick();
+
+  MX_USART2_UART_Init();
+  last_uart_tx_ms = HAL_GetTick();
   /* USER CODE END 2 */
 
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
-    while (1)
-    {
-    /* USER CODE END WHILE */
+  while (1)
+  {
+    const uint32_t now = HAL_GetTick();
 
-    /* USER CODE BEGIN 3 */
-
-        /** FUNCTION CALL OVERVIEW
-         * First: Call read6811 -> Voltages, Temps on 6811
-         * Second: Check for Faults
-         * Third: Call balancing algorithm
-         * Fourth : Remaining CAN messages
-         * Last: :3 
-         */
-    	if (poll_cell_voltages <= 0){
-    		poll_cell_voltages = 1000;
-    		volt_start_time = HAL_GetTick();
-
-    		for (int i = 0; i < NUM_BOARDS; i++){
-				poll_single_secondary_voltage_reading((uint8_t) i, &BMSConfig, bmsData);
-			}
-			cell_volt_timing = HAL_GetTick() - volt_start_time;
-
-			setCriticalVoltages(&BMSCriticalInfo, bmsData);
-
-			DISABLE_ALL_CAN_IRQS
-			bmsFault = FAULT_check(&BMSCriticalInfo, BMS_STATUS);
-			ENABLE_ALL_CAN_IRQS
-
-			// check voltage faults
-			bool overvoltage_fault	= ((BMS_STATUS[0] & 0x01) == 0x01);
-			bool undervoltage_fault = ((BMS_STATUS[0] & 0x02) == 0x02);
-
-
-			if((overvoltage_fault == true) || (undervoltage_fault == true)){
-				error_voltage_read_count++;
-			}
-
-    	}
-
-
-        // Read all Temps from LTC6811, store them in 144x6 array,
-        // set the critical info struct, then send temp info over CAN
-    	if (poll_cell_temps <= 0){
-    		poll_cell_temps = 2500;
-    		temp_start_time = HAL_GetTick();
-
-    	for (int i = 0; i < NUM_BOARDS; i++){
-    		poll_single_secondary_temp_reading((uint8_t) i, &BMSConfig, bmsData);
-    	}
-			cell_temp_timing = HAL_GetTick() - temp_start_time;
-			setCriticalTemps(&BMSCriticalInfo, bmsData);
-
-			DISABLE_ALL_CAN_IRQS
-			bmsFault = FAULT_check(&BMSCriticalInfo, BMS_STATUS);
-			ENABLE_ALL_CAN_IRQS
-
-			// check temperature faults
-			bool overtemp_fault		= ((BMS_STATUS[0] & 0x04) == 0x04);
-			bool undertemp_fault	= ((BMS_STATUS[0] & 0x08) == 0x08);
-
-
-			if((overtemp_fault == true) || (undertemp_fault == true)){
-				error_temp_read_count++;
-			}
-		}
-
-
-       // Check Precharge Complete Pin
-       manual_balancing_config.precharge_cplt = !(HAL_GPIO_ReadPin(PRECHARGE_COMPLETE_GPIO_Port, PRECHARGE_COMPLETE_Pin));
-       live_precharge = manual_balancing_config.precharge_cplt;
-       DISABLE_ALL_CAN_IRQS
-
-	   /* DO THIS WHEN TESTING BMS FAULTS*/
-	   //*NOTE* : need to figure out which pin is the BMS fault pin
-	   bmsFault = FAULT_check(&BMSCriticalInfo, BMS_STATUS);
-       if (bmsFault == false) {
-    	   global_error_count = 0;
-    	   fault_timer = 2000;
-    	   error_temp_read_count = 0;
-    	   error_voltage_read_count = 0;
-    	   HAL_GPIO_WritePin(BMS_FLT_EN_GPIO_Port, BMS_FLT_EN_Pin, GPIO_PIN_RESET);
-       }
-       else {
-    	   global_error_count++;
-    	   if ((error_temp_read_count >= 2) || (error_voltage_read_count >= 2)){
-    		   HAL_GPIO_WritePin(BMS_FLT_EN_GPIO_Port, BMS_FLT_EN_Pin, GPIO_PIN_SET);
-    		   error_temp_read_count = 2;
-    		   error_voltage_read_count = 2;
-    	   }
-       }
-
-        BMSCriticalInfo.isoAdcPackVoltage = (float)gIsoADCData.bus_voltage;
-        BMSCriticalInfo.packCurrent = (float)gIsoADCData.shunt_current;
-        ENABLE_ALL_CAN_IRQS
-    	DISABLE_CAN1_RX_FIF0_IRQ;
-        if(new_balance_msg == true){
-        	process_balancing_msg();
-        	new_balance_msg = 0;
-        }
-    	ENABLE_CAN1_RX_FIF0_IRQ;
-
-    	/* Discharge cells if:
-    	 * charge message is valid
-    	 * AND discharge is enabled
-    	 * AND precharge is complete (contactors are closed)
-    	 * AND there is no BMS fault
-    	 */
-        if((manual_balancing_config.valid_charge_message == true) &&
-			(manual_balancing_config.discharge_balance_en == true) &&
-			(manual_balancing_config.precharge_cplt == true) &&
-			(bmsFault == false)) {
-
-            thresholdBalance(&BMSConfig, &BMSCriticalInfo, bmsData, discharge, manual_balancing_config.discharge_threshold_voltage, manual_balancing_config.num_cells_discharged_per_secondary);
-          
-            dischargeCellGroups(&BMSConfig, discharge);
-            HAL_Delay(BMSConfig.dischargeTime);
-
-            dischargeCellGroups(&BMSConfig, discharge);
-            HAL_Delay(BMSConfig.dischargeTime);
-        }
-        else {
-        	thresholdBalance(&BMSConfig, &BMSCriticalInfo, bmsData, discharge, 43000, 0);	// default to an "off" state, cells should never go this high
-        }
-
-        // stop messages from being sent if no message has been sent in 2 seconds
-        if (charging_msg_timeout == 1) {
-        	resetChargerVariables();
-        }
-
+    if ((now - last_voltage_poll_ms) >= VOLTAGE_POLL_PERIOD_MS) {
+      last_voltage_poll_ms = now;
+      poll_cell_voltages_once();
+      refresh_fault_state();
     }
 
+    if ((now - last_temp_poll_ms) >= TEMP_POLL_PERIOD_MS) {
+      last_temp_poll_ms = now;
+      poll_cell_temps_once();
+      refresh_fault_state();
+    }
 
-  /* USER CODE END 3 */
+    handle_balancing();
+
+    if ((now - last_heartbeat_ms) >= HEARTBEAT_PERIOD_MS) {
+      last_heartbeat_ms = now;
+      heartbeat_task();
+    }
+
+    if ((now - last_uart_tx_ms) >= UART_TX_PERIOD_MS) {
+      last_uart_tx_ms = now;
+      uart_send_bms_telemetry();
+    }
+  }
 }
 
-/**
-  * @brief System Clock Configuration
-  * @retval None
-  */
+/*
+ * Set up a simple clock tree using the internal high-speed oscillator.
+ *
+ * This keeps the system clock configuration easy to reason about during bring
+ * up and avoids introducing PLL-related complexity in the main application
+ * file.
+ */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Configure the main internal regulator output voltage
-  */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
@@ -390,10 +369,7 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
@@ -405,124 +381,14 @@ void SystemClock_Config(void)
   }
 }
 
-/**
-  * @brief CAN1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_CAN1_Init(void)
-{
-
-  /* USER CODE BEGIN CAN1_Init 0 */
-  /* USER CODE END CAN1_Init 0 */
-
-  /* USER CODE BEGIN CAN1_Init 1 */
-
-  /* USER CODE END CAN1_Init 1 */
-  hcan1.Instance = CAN1;
-  hcan1.Init.Prescaler = 2;
-  hcan1.Init.Mode = CAN_MODE_NORMAL;
-  hcan1.Init.SyncJumpWidth = CAN_SJW_1TQ;
-  hcan1.Init.TimeSeg1 = CAN_BS1_13TQ;
-  hcan1.Init.TimeSeg2 = CAN_BS2_2TQ;
-  hcan1.Init.TimeTriggeredMode = DISABLE;
-  hcan1.Init.AutoBusOff = ENABLE;
-  hcan1.Init.AutoWakeUp = DISABLE;
-  hcan1.Init.AutoRetransmission = DISABLE;
-  hcan1.Init.ReceiveFifoLocked = DISABLE;
-  hcan1.Init.TransmitFifoPriority = DISABLE;
-  if (HAL_CAN_Init(&hcan1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN CAN1_Init 2 */
-
-	CAN_FilterTypeDef  sFilterConfig;
-	sFilterConfig.FilterBank = 0;
-	sFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK;
-	sFilterConfig.FilterScale = CAN_FILTERSCALE_16BIT;
-	sFilterConfig.FilterIdHigh = BMS_RX_MSG_ID;
-	sFilterConfig.FilterIdLow = 0xFFFF;
-	sFilterConfig.FilterMaskIdHigh = BMS_RX_MSG_MASK;
-	sFilterConfig.FilterMaskIdLow = 0x0000; // (any uint16_t) & 0x0000 != 0xFFFF
-	sFilterConfig.FilterFIFOAssignment = CAN_FILTER_FIFO0;
-	sFilterConfig.FilterActivation = ENABLE;
-	sFilterConfig.SlaveStartFilterBank = 14;
-
-	if (HAL_CAN_ConfigFilter(&hcan1, &sFilterConfig) != HAL_OK)
-	{
-	  /* Filter configuration Error */
-	  Error_Handler();
-	}
-
-  if (HAL_CAN_Start(&hcan1) != HAL_OK)
-  {
-	/* Start Error */
-	Error_Handler();
-  }
-
-  // This ties the interupt to the rx_fifo0 msg bufer
-  if (HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK)
-   {
-     Error_Handler();
-   }
-  /* USER CODE END CAN1_Init 2 */
-
-}
-
-/**
-  * @brief CAN2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_CAN2_Init(void)
-{
-
-  /* USER CODE BEGIN CAN2_Init 0 */
-
-  /* USER CODE END CAN2_Init 0 */
-
-  /* USER CODE BEGIN CAN2_Init 1 */
-
-  /* USER CODE END CAN2_Init 1 */
-  hcan2.Instance = CAN2;
-  hcan2.Init.Prescaler = 1;
-  hcan2.Init.Mode = CAN_MODE_NORMAL;
-  hcan2.Init.SyncJumpWidth = CAN_SJW_1TQ;
-  hcan2.Init.TimeSeg1 = CAN_BS1_13TQ;
-  hcan2.Init.TimeSeg2 = CAN_BS2_2TQ;
-  hcan2.Init.TimeTriggeredMode = DISABLE;
-  hcan2.Init.AutoBusOff = ENABLE;
-  hcan2.Init.AutoWakeUp = DISABLE;
-  hcan2.Init.AutoRetransmission = DISABLE;
-  hcan2.Init.ReceiveFifoLocked = DISABLE;
-  hcan2.Init.TransmitFifoPriority = DISABLE;
-  if (HAL_CAN_Init(&hcan2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN CAN2_Init 2 */
-
-  /* USER CODE END CAN2_Init 2 */
-
-}
-
-/**
-  * @brief SPI1 Initialization Function
-  * @param None
-  * @retval None
-  */
+/*
+ * Initialize SPI1 as a master peripheral.
+ *
+ * These settings define the clock mode and transfer format expected by the
+ * device connected to this bus.
+ */
 static void MX_SPI1_Init(void)
 {
-
-  /* USER CODE BEGIN SPI1_Init 0 */
-
-  /* USER CODE END SPI1_Init 0 */
-
-  /* USER CODE BEGIN SPI1_Init 1 */
-
-  /* USER CODE END SPI1_Init 1 */
-  /* SPI1 parameter configuration*/
   hspi1.Instance = SPI1;
   hspi1.Init.Mode = SPI_MODE_MASTER;
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
@@ -539,28 +405,16 @@ static void MX_SPI1_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN SPI1_Init 2 */
-
-  /* USER CODE END SPI1_Init 2 */
-
 }
 
-/**
-  * @brief SPI2 Initialization Function
-  * @param None
-  * @retval None
-  */
+/*
+ * Initialize SPI2 with the timing required by the device on that interface.
+ *
+ * The phase and prescaler differ from SPI1 because this bus is serving a
+ * different peripheral.
+ */
 static void MX_SPI2_Init(void)
 {
-
-  /* USER CODE BEGIN SPI2_Init 0 */
-
-  /* USER CODE END SPI2_Init 0 */
-
-  /* USER CODE BEGIN SPI2_Init 1 */
-
-  /* USER CODE END SPI2_Init 1 */
-  /* SPI2 parameter configuration*/
   hspi2.Instance = SPI2;
   hspi2.Init.Mode = SPI_MODE_MASTER;
   hspi2.Init.Direction = SPI_DIRECTION_2LINES;
@@ -577,28 +431,13 @@ static void MX_SPI2_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN SPI2_Init 2 */
-
-  /* USER CODE END SPI2_Init 2 */
-
 }
 
-/**
-  * @brief SPI3 Initialization Function
-  * @param None
-  * @retval None
-  */
+/*
+ * Initialize SPI3 as another master bus for board peripherals.
+ */
 static void MX_SPI3_Init(void)
 {
-
-  /* USER CODE BEGIN SPI3_Init 0 */
-
-  /* USER CODE END SPI3_Init 0 */
-
-  /* USER CODE BEGIN SPI3_Init 1 */
-
-  /* USER CODE END SPI3_Init 1 */
-  /* SPI3 parameter configuration*/
   hspi3.Instance = SPI3;
   hspi3.Init.Mode = SPI_MODE_MASTER;
   hspi3.Init.Direction = SPI_DIRECTION_2LINES;
@@ -615,30 +454,19 @@ static void MX_SPI3_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN SPI3_Init 2 */
-
-  /* USER CODE END SPI3_Init 2 */
-
 }
 
-/**
-  * @brief TIM1 Initialization Function
-  * @param None
-  * @retval None
-  */
+/*
+ * Configure TIM1 as a base timer with an internal clock source.
+ *
+ * No special trigger routing is used here; the timer is simply prepared for
+ * later scheduling or timing work elsewhere in the firmware.
+ */
 static void MX_TIM1_Init(void)
 {
-
-  /* USER CODE BEGIN TIM1_Init 0 */
-
-  /* USER CODE END TIM1_Init 0 */
-
   TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
 
-  /* USER CODE BEGIN TIM1_Init 1 */
-
-  /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 1;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
@@ -661,34 +489,23 @@ static void MX_TIM1_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN TIM1_Init 2 */
-
-  /* USER CODE END TIM1_Init 2 */
-
 }
 
-/**
-  * @brief TIM2 Initialization Function
-  * @param None
-  * @retval None
-  */
+/*
+ * Configure TIM2 for input-capture operation on channel 2.
+ *
+ * This lets the firmware timestamp incoming edges if another subsystem needs a
+ * measured external signal.
+ */
 static void MX_TIM2_Init(void)
 {
-
-  /* USER CODE BEGIN TIM2_Init 0 */
-
-  /* USER CODE END TIM2_Init 0 */
-
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_IC_InitTypeDef sConfigIC = {0};
 
-  /* USER CODE BEGIN TIM2_Init 1 */
-
-  /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
   htim2.Init.Prescaler = 0;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 4294967295;
+  htim2.Init.Period = 4294967295U;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_IC_Init(&htim2) != HAL_OK)
@@ -709,31 +526,20 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN TIM2_Init 2 */
-
-  /* USER CODE END TIM2_Init 2 */
-
 }
 
-/**
-  * @brief TIM3 Initialization Function
-  * @param None
-  * @retval None
-  */
+/*
+ * Configure TIM3 for PWM generation on channel 1.
+ *
+ * The post-init call finishes the pin-side setup after the timer itself is
+ * configured.
+ */
 static void MX_TIM3_Init(void)
 {
-
-  /* USER CODE BEGIN TIM3_Init 0 */
-
-  /* USER CODE END TIM3_Init 0 */
-
   TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
 
-  /* USER CODE BEGIN TIM3_Init 1 */
-
-  /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
   htim3.Init.Prescaler = 0;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
@@ -767,30 +573,16 @@ static void MX_TIM3_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN TIM3_Init 2 */
-
-  /* USER CODE END TIM3_Init 2 */
   HAL_TIM_MspPostInit(&htim3);
-
 }
 
-/**
-  * @brief TIM7 Initialization Function
-  * @param None
-  * @retval None
-  */
+/*
+ * Configure TIM7 as a simple periodic base timer.
+ */
 static void MX_TIM7_Init(void)
 {
-
-  /* USER CODE BEGIN TIM7_Init 0 */
-
-  /* USER CODE END TIM7_Init 0 */
-
   TIM_MasterConfigTypeDef sMasterConfig = {0};
 
-  /* USER CODE BEGIN TIM7_Init 1 */
-
-  /* USER CODE END TIM7_Init 1 */
   htim7.Instance = TIM7;
   htim7.Init.Prescaler = 0;
   htim7.Init.CounterMode = TIM_COUNTERMODE_UP;
@@ -806,27 +598,13 @@ static void MX_TIM7_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN TIM7_Init 2 */
-
-  /* USER CODE END TIM7_Init 2 */
-
 }
 
-/**
-  * @brief TIM13 Initialization Function
-  * @param None
-  * @retval None
-  */
+/*
+ * Configure TIM13 as an additional free-running time base.
+ */
 static void MX_TIM13_Init(void)
 {
-
-  /* USER CODE BEGIN TIM13_Init 0 */
-
-  /* USER CODE END TIM13_Init 0 */
-
-  /* USER CODE BEGIN TIM13_Init 1 */
-
-  /* USER CODE END TIM13_Init 1 */
   htim13.Instance = TIM13;
   htim13.Init.Prescaler = 495;
   htim13.Init.CounterMode = TIM_COUNTERMODE_UP;
@@ -837,434 +615,189 @@ static void MX_TIM13_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN TIM13_Init 2 */
-
-  /* USER CODE END TIM13_Init 2 */
-
 }
 
-/**
-  * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
-  */
+/*
+ * Initialize the GPIO used directly by this firmware.
+ *
+ * Output levels are written before the pins are switched into output mode so
+ * attached hardware does not see a brief unintended pulse during startup.
+ */
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-/* USER CODE BEGIN MX_GPIO_Init_1 */
-/* USER CODE END MX_GPIO_Init_1 */
 
-  /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(BMS_FLT_EN_GPIO_Port, BMS_FLT_EN_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(DEBUG_LED_GPIO_Port, DEBUG_LED_Pin, GPIO_PIN_SET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, SPI_UCOMM_CS_Pin|SPI_FERAM_CS_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(SPI_UCOMM_CS_GPIO_Port, SPI_UCOMM_CS_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(SPI_FERAM_CS_GPIO_Port, SPI_FERAM_CS_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(SPI_ADC_CS_GPIO_Port, SPI_ADC_CS_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(ADC_RST_GPIO_Port, ADC_RST_Pin, GPIO_PIN_SET);
 
-  /*Configure GPIO pins : BMS_FLT_EN_Pin ADC_RST_Pin */
-  GPIO_InitStruct.Pin = BMS_FLT_EN_Pin|ADC_RST_Pin;
+  GPIO_InitStruct.Pin = BMS_FLT_EN_Pin | ADC_RST_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : SHUTDOWN_ACTIVE_Pin LV_PWR_MONITOR_Pin ADC_DRDY_Pin */
-  GPIO_InitStruct.Pin = SHUTDOWN_ACTIVE_Pin|LV_PWR_MONITOR_Pin|ADC_DRDY_Pin;
+  GPIO_InitStruct.Pin = SHUTDOWN_ACTIVE_Pin | LV_PWR_MONITOR_Pin | ADC_DRDY_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PRECHARGE_COMPLETE_Pin */
   GPIO_InitStruct.Pin = PRECHARGE_COMPLETE_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(PRECHARGE_COMPLETE_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : DEBUG_LED_Pin */
   GPIO_InitStruct.Pin = DEBUG_LED_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
   HAL_GPIO_Init(DEBUG_LED_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : SPI_UCOMM_CS_Pin SPI_FERAM_CS_Pin */
-  GPIO_InitStruct.Pin = SPI_UCOMM_CS_Pin|SPI_FERAM_CS_Pin;
+  GPIO_InitStruct.Pin = SPI_UCOMM_CS_Pin | SPI_FERAM_CS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : SPI_ADC_CS_Pin */
   GPIO_InitStruct.Pin = SPI_ADC_CS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(SPI_ADC_CS_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : CHARGE_EN_Pin */
   GPIO_InitStruct.Pin = CHARGE_EN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(CHARGE_EN_GPIO_Port, &GPIO_InitStruct);
-
-/* USER CODE BEGIN MX_GPIO_Init_2 */
-/* USER CODE END MX_GPIO_Init_2 */
 }
 
-/* USER CODE BEGIN 4 */
-void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan){
-	HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, (CAN_RxHeaderTypeDef *) &rx_header, (uint8_t*) rx_data);
 
-	switch(rx_header.StdId){
-		case CAN_1_CPU_BMS_VIEWER_POLL_ID:
-			pollingFlag = true;
-			break;
-		case MANUAL_BALANCING_ID:
-			new_balance_msg = 1;
-			for(int i = 0; i < rx_header.DLC; i++){
-				balancing_data_array[i] = rx_data[i];
-			}
-			break;
-		default:
-			break;
-	}
+#pragma pack(push, 1)
+typedef struct
+{
+  uint8_t sof1;
+  uint8_t sof2;
+  uint8_t payload_len;
+  uint32_t timestamp_ms;
+
+  uint16_t cell_voltage_mV[NUM_USED_CELLS];
+  int16_t cell_temp_cC[NUM_USED_CELLS];
+
+  uint16_t pack_voltage_mV;
+  uint8_t status_bytes[6];
+
+  uint16_t crc;
+} BmsUartPacket_t;
+#pragma pack(pop)
+
+static uint16_t crc16_ccitt(const uint8_t *data, uint16_t length)
+{
+  uint16_t crc = 0xFFFFU;
+
+  for (uint16_t i = 0U; i < length; i++) {
+      crc ^= (uint16_t)((uint16_t)data[i] << 8);
+
+      for (uint8_t bit = 0U; bit < 8U; bit++) {
+          if ((crc & 0x8000U) != 0U) {
+              crc = (uint16_t)((crc << 1) ^ 0x1021U);
+          } else {
+              crc <<= 1;
+          }
+      }
+  }
+
+  return crc;
 }
 
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
-	if(htim == &htim1){
-		HAL_GPIO_WritePin(DEBUG_LED_GPIO_Port, DEBUG_LED_Pin, GPIO_PIN_SET);
+static void build_display_temperatures_cC(int16_t temp_display_cC[NUM_USED_CELLS])
+{
+  int16_t t1_cC = 0;
+  int16_t t2_cC = 0;
 
-		uint32_t new_t = HAL_GetTick();
-		timeBetween = new_t - prevTime;
-		if(timeBetween >= 11){
-			isoADC_period_miss++;
-			if(timeBetween > max_isoADC_period){
-				max_isoADC_period = (uint8_t) timeBetween;
-			}
-		}
+  /* Use representative cell from each thermistor group */
+  t1_cC = (int16_t)(bmsData[0].temperature / 10U);
+  t2_cC = (int16_t)(bmsData[3].temperature / 10U);
 
-		prevTime = new_t;
-		isoADC_rdy_status = read_isoADC_ADCs(&gIsoADCConfig, &gIsoADCData);
-		error_cnt += (uint8_t) (gIsoADCData.ch0_drdy ? 0 : 1);
-		convert_raw_to_actual(&gIsoADCConfig, &gIsoADCData);
-		BMSCriticalInfo.isoAdcPackVoltage = (float)gIsoADCData.bus_voltage;
-		BMSCriticalInfo.packCurrent = (float)gIsoADCData.shunt_current;
-		live_pack_voltage = BMSCriticalInfo.isoAdcPackVoltage;
-		live_pack_current = BMSCriticalInfo.packCurrent;
-		transmit_bms_status_msg(&BMSCriticalInfo, BMS_STATUS);
-		HAL_GPIO_WritePin(DEBUG_LED_GPIO_Port, DEBUG_LED_Pin, GPIO_PIN_RESET);
-
-	}
+  temp_display_cC[0] = t1_cC;
+  temp_display_cC[1] = t1_cC;
+  temp_display_cC[2] = t1_cC;
+  temp_display_cC[3] = t2_cC;
+  temp_display_cC[4] = t2_cC;
+  temp_display_cC[5] = t2_cC;
 }
 
-void send_can_msg_from_irq(){
-	can_tx_phase++;
-	switch(can_tx_phase){
-		case 1:
-			transmit_cell_vlt_msg(&BMSCriticalInfo);
-			break;
-		case 2:
-//			transmit_bms_status_msg(&BMSCriticalInfo, BMS_STATUS);
-			break;
-		case 3:
-			transmit_cell_temp_msg(&BMSCriticalInfo);
-			break;
-		case 4:
-			if ((manual_balancing_config.valid_charge_message == true) &&
-				(manual_balancing_config.charge_en == true) &&
-				(!bmsFault == true)) {
-				CHARGER_message();
-			}
-			break;
-		case 5:
-			can_tx_phase = 0;
-			break;
-	}
+static void uart_send_bms_telemetry(void)
+{
+  BmsUartPacket_t packet;
+  int16_t expandedTemps[NUM_USED_CELLS];
+  uint16_t crc_input_len;
+
+  memset(&packet, 0, sizeof(packet));
+
+  packet.sof1 = UART_BMS_PACKET_SOF1;
+  packet.sof2 = UART_BMS_PACKET_SOF2;
+  packet.payload_len = (uint8_t)(sizeof(BmsUartPacket_t) - 3U); /* excludes sof1, sof2, payload_len */
+  packet.timestamp_ms = HAL_GetTick();
+
+  for (uint8_t i = 0U; i < NUM_USED_CELLS; i++) {
+    /*
+      * Cell voltage code to mV
+      * 42000 -> 4200 mV
+      */
+    packet.cell_voltage_mV[i] = (uint16_t)(bmsData[i].voltage / 10U);
 }
 
-void send_cell_vals_polling(){
-	// Reread 391 to see if this is bad
-	DISABLE_ALL_CAN_IRQS
-	if (pollingFlag || CONSTANT_CAN_ENABLE){
-		transmit_cell_data_msg(bmsData);
-		pollingFlag = false;
-	}
-	charging_msg_timeout = 1;
-	ENABLE_ALL_CAN_IRQS
+  build_display_temperatures_cC(expandedTemps);
+
+  for (uint8_t i = 0U; i < NUM_USED_CELLS; i++) {
+    packet.cell_temp_cC[i] = expandedTemps[i];
+  }
+
+  packet.pack_voltage_mV = BMSCriticalInfo.cellMonitorPackVoltage;
+
+  for (uint8_t i = 0U; i < 6U; i++) {
+    packet.status_bytes[i] = BMS_STATUS[i];
+  }
+
+  crc_input_len = (uint16_t)(sizeof(BmsUartPacket_t) - sizeof(packet.crc));
+  packet.crc = crc16_ccitt((const uint8_t *)&packet, crc_input_len);
+
+  (void)HAL_UART_Transmit(&huart2, (uint8_t *)&packet, sizeof(packet), 50U);
 }
 
-static bool transmit_can_message(CAN_HandleTypeDef* hcan, const CAN_TxHeaderTypeDef *tx_header, const uint8_t msg_data[]) {
-    uint32_t can_error_code = HAL_CAN_GetError(hcan);
 
-    // If we're in bus off or error passive, skip the 5ms timeout (but try to transmit anyway)
-    if (!(can_error_code & (HAL_CAN_ERROR_BOF | HAL_CAN_ERROR_EPV))) {
-        // Bus OK - wait for up to 5ms for space to become available in the transmit mailboxes
-        uint32_t start_tick = HAL_GetTick();
-        while(HAL_CAN_GetTxMailboxesFreeLevel(hcan) == 0 && HAL_GetTick() - start_tick < CAN_TX_TIMEOUT) {}
-    }
-
-    return HAL_CAN_AddTxMessage(hcan, tx_header, msg_data, &tx_mailbox) == HAL_OK;
-}
-
-static void transmit_cell_data_msg(CellData const bmsData[NUM_CELLS]) {
-    CAN_TxHeaderTypeDef header = {
-        .StdId = CAN_1_BMS_CELL_DATA_ID,
-        .DLC = CAN_1_BMS_CELL_DATA_LENGTH,
-        .IDE = CAN_ID_STD,
-        .RTR = CAN_RTR_DATA,
-        .TransmitGlobalTime = DISABLE
-    };
-
-    uint8_t data[CAN_1_BMS_CELL_DATA_LENGTH];
-    struct can_1_bms_cell_data cell_data_msg = {};
-
-    for (uint8_t cell = 0; cell < NUM_CELLS; cell++) {
-        cell_data_msg.idx_cell_data = cell;
-
-        cell_data_msg.vlt_cell_data = (float)bmsData[cell].voltage / LTC6811_ADC_LSB_PER_V;
-        cell_data_msg.temp_cell_data = (float)bmsData[cell].temperature / 1000.0F;
-        // TODO: remove placeholder values after merging SOC estimation branch
-        cell_data_msg.soc_cell_data = 0.0F;
-        cell_data_msg.soh_cell_data = 0.0F;
-
-        // TODO: make bmsData[cell].fault a bitfield
-        cell_data_msg.cell_fault_disconnected = (bool)(bmsData[cell].fault & CELL_DISCONNECT_MASK);
-        cell_data_msg.cell_fault_dc = (bool)(bmsData[cell].fault & CELL_DCFAULT_MASK);
-        cell_data_msg.cell_fault_temp = (bool)(bmsData[cell].fault & CELL_TEMP_FAIL_MASK);
-        cell_data_msg.cell_fault_pec = (bool)(bmsData[cell].fault & CELL_PEC_FAIL_MASK);
-
-        can_1_bms_cell_data_pack(data, &cell_data_msg, sizeof(data));
-        transmit_can_message(&hcan1, &header, data);
-    }
-}
-
-static void transmit_bms_status_msg(BMS_critical_info_t const *bms, uint8_t const bmsStatus[6]) {
-    // canCounter2++;
-    CAN_TxHeaderTypeDef header = {
-        .StdId = CAN_1_BMS_STATUS_ID,
-        .DLC = CAN_1_BMS_STATUS_LENGTH,
-        .IDE = CAN_ID_STD,
-        .RTR = CAN_RTR_DATA,
-        .TransmitGlobalTime = DISABLE
-    };
-
-    uint8_t data[CAN_1_BMS_STATUS_LENGTH];
-    struct can_1_bms_status status_msg = {
-        .soc_accum = 0.0F,
-        .cur_accum = (float)bms->packCurrent,
-        .vlt_accum = (float)bms->isoAdcPackVoltage,
-		.vlt_accum_6811 = (float)bms->cellMonitorPackVoltage / 10.0F,
-
-        // TODO: refactor tf out of this lol
-        .bms_fault_ovp = bmsStatus[0] & 0x01,
-        .bms_fault_uvp = bmsStatus[0] & 0x02,
-        .bms_fault_otp = bmsStatus[0] & 0x04,
-        .bms_fault_utp = bmsStatus[0] & 0x08,
-
-        // TODO: do we really not read this anywhere else in code? also active high/low?
-        .precharge_cplt = !(HAL_GPIO_ReadPin(PRECHARGE_COMPLETE_GPIO_Port, PRECHARGE_COMPLETE_Pin))
-    };
-
-    can_1_bms_status_pack(data, &status_msg, sizeof(data));
-    transmit_can_message(&hcan1, &header, data);
-}
-
-static void transmit_cell_vlt_msg(BMS_critical_info_t const *bms) {
-    CAN_TxHeaderTypeDef header = {
-        .StdId = CAN_1_BMS_CELL_VLT_ID,
-        .DLC = CAN_1_BMS_CELL_VLT_LENGTH,
-        .IDE = CAN_ID_STD,
-        .RTR = CAN_RTR_DATA,
-        .TransmitGlobalTime = DISABLE
-    };
-
-    uint8_t data[CAN_1_BMS_CELL_VLT_LENGTH];
-    struct can_1_bms_cell_vlt cell_vlt_msg = {
-        .vlt_cell_max = (float)bms->curr_max_voltage / LTC6811_ADC_LSB_PER_V,
-        .vlt_cell_min = (float)bms->curr_min_voltage / LTC6811_ADC_LSB_PER_V,
-        // TODO: make cell indices consistent
-        .idx_vlt_max = bms->max_volt_cell,
-        .idx_vlt_min = bms->min_volt_cell
-    };
-
-    can_1_bms_cell_vlt_pack(data, &cell_vlt_msg, sizeof(data));
-    transmit_can_message(&hcan1, &header, data);
-}
-
-static void transmit_cell_temp_msg(BMS_critical_info_t const *bms) {
-    CAN_TxHeaderTypeDef header = {
-        .StdId = CAN_1_BMS_CELL_TEMP_ID,
-        .DLC = CAN_1_BMS_CELL_TEMP_LENGTH,
-        .IDE = CAN_ID_STD,
-        .RTR = CAN_RTR_DATA,
-        .TransmitGlobalTime = DISABLE
-    };
-
-    uint8_t data[CAN_1_BMS_CELL_TEMP_LENGTH];
-    struct can_1_bms_cell_temp cell_temp_msg = {
-        // TODO
-        .temp_cell_max = (float)bms->curr_max_temp / 1000.0F,
-        .temp_cell_min = (float)bms->curr_min_temp / 1000.0F,
-        // TODO: make cell indices consistent
-        .idx_temp_max = bms->max_temp_cell,
-        .idx_temp_min = bms->min_temp_cell
-    };
-
-    can_1_bms_cell_temp_pack(data, &cell_temp_msg, sizeof(data));
-    transmit_can_message(&hcan1, &header, data);
-
-    // TODO: wtf does this do?? 2024 accumulator fans?
-    // Insert PWM code
-    // if ((maxT < 17400) || bmsFault) {
-    //     HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, GPIO_PIN_RESET);
-    // } else {
-    //     HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, GPIO_PIN_SET);
-    //     // HAL_GPIO_TogglePin(DEBUG_GPIO_Port, DEBUG_Pin);	// which PIN is this? 
-    // }
-}
-
-void CHARGER_message() {
-	tx_header.StdId = 0;  // Set to 0 for extended IDs
-	tx_header.ExtId = CHARGER_IN_ID; // Set your 29-bit ID
-	tx_header.DLC = 8;				// set command length
-	tx_header.IDE = CAN_ID_EXT;       // Set to extended ID
-
-	uint8_t CHARGER_DATA[8];
-
-	if ((manual_balancing_config.charge_en == true) &&
-		(manual_balancing_config.valid_charge_message == true) &&
-		(manual_balancing_config.precharge_cplt == true)) {
-		CHARGER_DATA[0] = (uint8_t)((manual_balancing_config.charge_voltage >> 8) & 0xFF);
-		CHARGER_DATA[1] = (uint8_t)(manual_balancing_config.charge_voltage & 0xFF);
-		CHARGER_DATA[2] = (uint8_t)((manual_balancing_config.charge_current >> 8) & 0xFF);
-		CHARGER_DATA[3] = (uint8_t)(manual_balancing_config.charge_current & 0xFF);
-	}
-	else {
-		return;	// abort send
-	}
-
-    /* these data bytes are not used */
-	CHARGER_DATA[4] = 0x00;
-	CHARGER_DATA[5] = 0x00;
-	CHARGER_DATA[6] = 0x00;
-	CHARGER_DATA[7] = 0x00;
-
-    transmit_can_message(&hcan1, &tx_header, CHARGER_DATA);
-
-    // reset to normal
-	tx_header.StdId = 0;  // Set to 0 for extended IDs
-	tx_header.ExtId = 0; // Set your 29-bit ID
-	tx_header.DLC = 8;				// set command length
-	tx_header.IDE = CAN_ID_STD;       // Set to extended ID
-}
-
-// reset all variables to default
-void resetChargerVariables() {
-	manual_balancing_config.charge_en = false;		// disable charge
-	manual_balancing_config.charge_voltage = 6000;	// 600V
-	manual_balancing_config.charge_current = 0;		// 0A
-
-	manual_balancing_config.discharge_balance_en = false;	// disable discharge balance
-	manual_balancing_config.num_cells_discharged_per_secondary = 0;	// no cells to be discharged
-	manual_balancing_config.discharge_threshold_voltage = 41600;	// 4.16V
-
-	manual_balancing_config.valid_charge_message = false;	// assume invalid message
-}
-
-void process_balancing_msg(){
-	manual_balancing_config.charge_en = (balancing_data_array[0] == 0xFF);
-	manual_balancing_config.charge_voltage = ((balancing_data_array[1] << 8) | (balancing_data_array[2]));
-	manual_balancing_config.charge_current = ((balancing_data_array[3] << 8) | (balancing_data_array[4]));
-
-	manual_balancing_config.discharge_balance_en = (balancing_data_array[5] & 0xF0) == 0xF0;
-	manual_balancing_config.num_cells_discharged_per_secondary = (balancing_data_array[5] & 0x0F);
-	manual_balancing_config.discharge_threshold_voltage = ((balancing_data_array[6] << 8) | (balancing_data_array[7]));
-
-	// check for validity
-
-	// if both charge and balance are enabled, invalid message
-	if ((manual_balancing_config.charge_en == true) && (manual_balancing_config.discharge_balance_en == true)) {
-	  manual_balancing_config.valid_charge_message = false;
-	  resetChargerVariables();
-	}
-
-	// if charge is enabled AND if charge voltage is out of bounds [500-600][V]
-	// multiplied by 10 -> [5000 - 6000]
-	if ((manual_balancing_config.charge_en == true) && ((manual_balancing_config.charge_voltage < 5000) || (manual_balancing_config.charge_voltage > 6000))) {
-	  manual_balancing_config.valid_charge_message = false;
-	  resetChargerVariables();
-	}
-
-	// if charge is enabled AND if charge current is out of bounds [0-10][A]
-	// multiplied by 10 -> [0 - 100]
-	if ((manual_balancing_config.charge_en == true) && (manual_balancing_config.charge_current > 100)) {
-	  manual_balancing_config.valid_charge_message = false;
-	  resetChargerVariables();
-	}
-
-	// if cell discharge count is out of bounds
-	if ((manual_balancing_config.discharge_balance_en == true) && (manual_balancing_config.num_cells_discharged_per_secondary > 12)) {
-	  manual_balancing_config.valid_charge_message = false;
-	  resetChargerVariables();
-	}
-
-	// if discharge is enabled AND if discharge cell threshold is out of bounds [3.2-4.2][V]
-	// multiplied by 10,000 -> [32000 - 42000]
-	if ((manual_balancing_config.discharge_balance_en == true) && ((manual_balancing_config.discharge_threshold_voltage < 32000) || (manual_balancing_config.discharge_threshold_voltage > 42000))) {
-	  manual_balancing_config.valid_charge_message = false;
-	  resetChargerVariables();
-	}
-
-	// if all conditions passed, charge message is true
-	manual_balancing_config.valid_charge_message = true;
-	charging_msg_timeout = 0;
-
-}
-
-/* USER CODE END 4 */
-
-/**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
+/*
+ * Stop normal execution after an unrecoverable error.
+ *
+ * Once we get here, interrupts are disabled and the firmware stays in a tight
+ * loop so the failure is obvious during debugging.
+ */
 void Error_Handler(void)
 {
-  /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
-  /* USER CODE END Error_Handler_Debug */
 }
 
-#ifdef  USE_FULL_ASSERT
-/**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
+#ifdef USE_FULL_ASSERT
+/*
+ * HAL assertion hook.
+ *
+ * The file and line are currently unused, but the function is kept so full
+ * assert builds still have a defined landing point.
+ */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-  /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-  /* USER CODE END 6 */
+  (void)file;
+  (void)line;
 }
-#endif /* USE_FULL_ASSERT */
+#endif

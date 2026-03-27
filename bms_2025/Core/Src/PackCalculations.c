@@ -1,176 +1,226 @@
-
 #include "PackCalculations.h"
 
-//! @brief This method calculates the maximum and minimum cell voltages in
-//!      the pack, and sets those values w/ the associated cell number to the
-//!      bms critical info struct
-//! @param cfg is the bms configuration file with constants used in our bms
-//! @param bms is the bms struct that contains critical info regarding our pack 
-//! @param bmsData is an array of NUM_CELLS cellData structs, containing index, fault,
-//!      voltage and temperature
-//! @returns none 
-void setCriticalVoltages(BMS_critical_info_t *bms,
-        CellData const bmsData[NUM_CELLS]) {
-    uint16_t maxCellVoltage;
-    uint16_t minCellVoltage;
-    uint16_t cellVoltage;
+#include <limits.h>
+#include <stdbool.h>
+#include <stdint.h>
 
-    uint16_t totalVoltage = 0;
+#define PACK_TOTAL_VOLTAGE_DIVISOR_TO_MV   10U
+#define INVALID_TEMP_READING               0U
 
+static uint8_t s_threshold_balance_counter = 0U;
 
-	bms->curr_min_voltage = MAXINT16;
-	bms->curr_max_voltage = 0;
-
-    for(uint8_t cell = 0; cell < NUM_CELLS; cell++) {
-    	//First two is due to fucky cell voltages,
-        //unsure about 0 -> for sume reason cellVoltage goes to 1027?
-
-    	cellVoltage = bmsData[cell].voltage;
-
-    	totalVoltage += (cellVoltage/1000);
-
-    	maxCellVoltage = bms->curr_max_voltage;
-
-        // Check if cell readings is a max voltage or min voltage
-        if(cellVoltage > maxCellVoltage
-                && cellVoltage < INVALID_VOLTAGE_UPPER_THRESHOLD) {
-            bms->curr_max_voltage = cellVoltage;
-			bms->max_volt_cell = cell;
+static void clear_discharge_matrix(bool discharge[NUM_BOARDS][12])
+{
+    for (uint8_t board = 0U; board < NUM_BOARDS; board++) {
+        for (uint8_t cell = 0U; cell < 12U; cell++) {
+            discharge[board][cell] = false;
         }
-		if(cellVoltage >= INVALID_VOLTAGE_UPPER_THRESHOLD) {
-			bms->invalid_data = true;
-            bms->invalid_data_cell = cell;
-		}
-
-        minCellVoltage = bms->curr_min_voltage;
-
-        if((cellVoltage < minCellVoltage || minCellVoltage == 0)
-                && cellVoltage > INVALID_VOLTAGE_LOWER_THRESHOLD) {
-            bms->curr_min_voltage = cellVoltage;
-			bms->min_volt_cell = cell;
-        }
-		if(cellVoltage <= INVALID_VOLTAGE_LOWER_THRESHOLD) {
-			bms->invalid_data = true;
-            bms->invalid_data_cell = cell;
-		}        
     }
-	bms->cellMonitorPackVoltage = totalVoltage;
 }
 
+void setCriticalVoltages(BMS_critical_info_t *bms, CellData const bmsData[NUM_CELLS])
+{
+    uint32_t total_pack_mV = 0U;
+    bool valid_found = false;
 
-//! @brief This method calculates the maximum and minimum cell temps in the
-//!      pack, and sets those values w/ the associated cell number to the bms
-//!      critical info struct
-//! @param cfg is the bms configuration file with constants used in our bms
-//! @param bms is the bms struct that contains critical info regarding our pack 
-//! @param bmsData is an array of NUM_CELLS cellData structs,
-//!      containing index, fault, voltage and temperature
-//! @returns none 
-void setCriticalTemps(BMS_critical_info_t *bms, CellData const bmsData[NUM_CELLS]) {
-	 	uint16_t maxCellTemp;
-	    uint16_t minCellTemp;
-	    uint16_t cellTemp;
+    bms->curr_min_voltage = UINT16_MAX;
+    bms->curr_max_voltage = 0U;
+    bms->invalid_data = false;
+    bms->invalid_data_cell = 255U;
+    bms->min_volt_cell = 255U;
+    bms->max_volt_cell = 255U;
 
-		bms->curr_min_temp = MAXINT16;
-		bms->curr_max_temp = 0;
-	
-	    for(uint8_t cell = 0; cell < NUM_CELLS; cell++) {
-	    	cellTemp = bmsData[cell].temperature;
-	    	maxCellTemp = bms->curr_max_temp;
-	    	if(cellTemp > maxCellTemp){
-	    	   bms->curr_max_temp = cellTemp;
-	    	   bms->max_temp_cell = cell;
-	    	}
+    for (uint8_t cell = 0U; cell < NUM_CELLS; cell++) {
+        const uint16_t cellVoltage = bmsData[cell].voltage;
+        const bool valid_voltage =
+            (cellVoltage > INVALID_VOLTAGE_LOWER_THRESHOLD) &&
+            (cellVoltage < INVALID_VOLTAGE_UPPER_THRESHOLD);
 
-	    	minCellTemp = bms->curr_min_temp;
-	        if(cellTemp < minCellTemp || minCellTemp == 0) {
-	            bms->curr_min_temp = cellTemp;
-	            bms->min_temp_cell = cell;
-	        }
-	    }
+        if (!valid_voltage) {
+            bms->invalid_data = true;
+            bms->invalid_data_cell = cell;
+            continue;
+        }
 
+        valid_found = true;
+
+        /*
+         * LTC6811 cell codes are typically in 100 uV/count.
+         * 42000 -> 4.2000 V -> 4200 mV
+         */
+        total_pack_mV += (uint32_t)(cellVoltage / PACK_TOTAL_VOLTAGE_DIVISOR_TO_MV);
+
+        if (cellVoltage > bms->curr_max_voltage) {
+            bms->curr_max_voltage = cellVoltage;
+            bms->max_volt_cell = cell;
+        }
+
+        if (cellVoltage < bms->curr_min_voltage) {
+            bms->curr_min_voltage = cellVoltage;
+            bms->min_volt_cell = cell;
+        }
+    }
+
+    if (!valid_found) {
+        bms->curr_min_voltage = 0U;
+        bms->curr_max_voltage = 0U;
+        bms->min_volt_cell = 255U;
+        bms->max_volt_cell = 255U;
+        bms->cellMonitorPackVoltage = 0U;
+        return;
+    }
+
+    if (total_pack_mV > UINT16_MAX) {
+        bms->cellMonitorPackVoltage = UINT16_MAX;
+    } else {
+        bms->cellMonitorPackVoltage = (uint16_t)total_pack_mV;
+    }
 }
 
-//! @brief This function is still a work in progress
-void balance(BMSConfigStructTypedef const *cfg, BMS_critical_info_t *bms,
-        CellData bmsData[NUM_CELLS], bool cellDischarge[NUM_BOARDS][12],
-        bool fullDischarge[NUM_BOARDS][12], uint8_t balanceCounter,
-        uint8_t *chargeRate) {
-	uint16_t maxCellVoltage = bms->curr_max_voltage;
-//	uint16_t minCellVoltage = bms.curr_min_voltage;
-	uint16_t cellVoltage = 0;
-	int32_t differenceVoltage = 0;
+void setCriticalTemps(BMS_critical_info_t *bms, CellData const bmsData[NUM_CELLS])
+{
+    bool valid_found = false;
 
-    // if cell voltage in range, balance cells
-	if ((maxCellVoltage > cfg->balancing_start_threshold)) {  
-		for (uint8_t cell = 0; cell < NUM_CELLS; cell++) {
+    bms->curr_min_temp = UINT16_MAX;
+    bms->curr_max_temp = 0U;
+    bms->min_temp_cell = 255U;
+    bms->max_temp_cell = 255U;
 
-			cellVoltage = bmsData[cell].voltage;
+    for (uint8_t cell = 0U; cell < NUM_CELLS; cell++) {
+        const uint16_t cellTemp = bmsData[cell].temperature;
 
-			differenceVoltage = (int32_t) cellVoltage - cfg->balancing_start_threshold;
+        /* Do not treat 0C as automatically invalid */
+        valid_found = true;
 
-            //For case where cell is not a "Top" (maximum)
-			if(differenceVoltage < 0) continue;	
-			
-            uint8_t moduleIndex = cell / cfg->numOfCellsPerIC;
-            uint8_t cellIndex = cell % cfg->numOfCellsPerIC;
-			/*Unsure if this will work right now-- overall, structure is good,
-             * but actual balancing seems weird*/
-			if (cellVoltage > cfg->stopCharge_threshold 
-                    && cellVoltage != 65535) {
-            // if voltage is above charge threshold(and not a garbage value), 
-            // turn off charger
-				*chargeRate = 0;
-				fullDischarge[moduleIndex][cellIndex] = 1;
-			} else if (cell % 12 == balanceCounter 
-                    && differenceVoltage > cfg->balancing_difference) {
-				cellDischarge[moduleIndex][cellIndex] = 1;
+        if (cellTemp > bms->curr_max_temp) {
+            bms->curr_max_temp = cellTemp;
+            bms->max_temp_cell = cell;
+        }
 
-			} else {
-				cellDischarge[moduleIndex][cellIndex] = 0;
-			}
-		}
-	}
-	
-	balance_counter++;
+        if (cellTemp < bms->curr_min_temp) {
+            bms->curr_min_temp = cellTemp;
+            bms->min_temp_cell = cell;
+        }
+    }
 
-    if(balance_counter >= 12) {
-        balance_counter = 0;
-    } 
+    if (!valid_found) {
+        bms->curr_min_temp = 0U;
+        bms->curr_max_temp = 0U;
+        bms->min_temp_cell = 255U;
+        bms->max_temp_cell = 255U;
+    }
 }
 
-//! @brief WIP/untested. Should be run while accumulator is not charging, discharges any cells above the threshold
-void thresholdBalance(BMSConfigStructTypedef *cfg, BMS_critical_info_t *bms,
-        CellData bmsData[NUM_CELLS], bool cell_discharge[NUM_BOARDS][12],
-        uint16_t cell_discharge_threshold,
-        uint8_t num_cells_discharge_per_secondary) {
-	uint16_t cell_voltage = 0;
+void balance(BMSConfigStructTypedef const *cfg,
+             BMS_critical_info_t *bms,
+             CellData bmsData[NUM_CELLS],
+             bool cellDischarge[NUM_BOARDS][12],
+             bool fullDischarge[NUM_BOARDS][12],
+             uint8_t balanceCounter,
+             uint8_t *chargeRate)
+{
+    (void)fullDischarge;
+    (void)chargeRate;
 
-	if (num_cells_discharge_per_secondary == 0) {	// protect from divide by 0 error
-		return;
-	}
+    clear_discharge_matrix(cellDischarge);
 
-	uint8_t discharge_cell_modulo = 12 / num_cells_discharge_per_secondary;
+    if (cfg == NULL || bms == NULL) {
+        return;
+    }
 
-	if (bms->curr_max_voltage > cell_discharge_threshold) { // if all cells are below the threshold, no need to discharge any of them
-		for  (uint8_t cell = 0; cell < NUM_CELLS; cell++) {
-			cell_voltage = bmsData[cell].voltage;
+    if (bms->curr_max_voltage <= cfg->balancing_start_threshold) {
+        return;
+    }
 
-			if ((cell_voltage <= cell_discharge_threshold) || (cell_voltage == 65535)) {
-				cell_discharge[cell / cfg->numOfCellsPerIC][cell % cfg->numOfCellsPerIC] = 0;
-			}
-			else if (cell % discharge_cell_modulo == balance_counter) { // We won't get to this point if the cell voltage is below the threshold
-				cell_discharge[cell / cfg->numOfCellsPerIC][cell % cfg->numOfCellsPerIC] = 1;
-			}
-			else {
-				cell_discharge[cell / cfg->numOfCellsPerIC][cell % cfg->numOfCellsPerIC] = 0;
-			}
-		}
+    if (cfg->numOfCellsPerIC == 0U) {
+        return;
+    }
 
-		balance_counter++;
+    const uint8_t rr_slot = (uint8_t)(balanceCounter % cfg->numOfCellsPerIC);
 
-		if(balance_counter >= discharge_cell_modulo) {
-			balance_counter = 0;
-		}
-	}
+    for (uint8_t cell = 0U; cell < NUM_CELLS; cell++) {
+        const uint16_t cellVoltage = bmsData[cell].voltage;
+        const bool valid_voltage =
+            (cellVoltage > INVALID_VOLTAGE_LOWER_THRESHOLD) &&
+            (cellVoltage < INVALID_VOLTAGE_UPPER_THRESHOLD);
+
+        if (!valid_voltage) {
+            continue;
+        }
+
+        if ((cellVoltage >= (uint16_t)(cfg->balancing_start_threshold + cfg->balancing_difference)) &&
+            ((cell % cfg->numOfCellsPerIC) == rr_slot)) {
+            const uint8_t boardIndex = (uint8_t)(cell / cfg->numOfCellsPerIC);
+            const uint8_t cellIndex  = (uint8_t)(cell % cfg->numOfCellsPerIC);
+            cellDischarge[boardIndex][cellIndex] = true;
+        }
+    }
+}
+
+void thresholdBalance(BMSConfigStructTypedef *cfg,
+                      BMS_critical_info_t *bms,
+                      CellData bmsData[NUM_CELLS],
+                      bool cell_discharge[NUM_BOARDS][12],
+                      uint16_t cell_discharge_threshold,
+                      uint8_t num_cells_discharge_per_secondary)
+{
+    clear_discharge_matrix(cell_discharge);
+
+    if (cfg == NULL || bms == NULL) {
+        return;
+    }
+
+    if (cfg->numOfCellsPerIC == 0U || num_cells_discharge_per_secondary == 0U) {
+        return;
+    }
+
+    if (bms->curr_max_voltage <= cell_discharge_threshold) {
+        return;
+    }
+
+    uint8_t discharge_cell_modulo =
+        (uint8_t)(cfg->numOfCellsPerIC / num_cells_discharge_per_secondary);
+
+    if (discharge_cell_modulo == 0U) {
+        discharge_cell_modulo = 1U;
+    }
+
+    for (uint8_t cell = 0U; cell < NUM_CELLS; cell++) {
+        const uint16_t cell_voltage = bmsData[cell].voltage;
+        const bool valid_voltage =
+            (cell_voltage > INVALID_VOLTAGE_LOWER_THRESHOLD) &&
+            (cell_voltage < INVALID_VOLTAGE_UPPER_THRESHOLD);
+
+        if (!valid_voltage) {
+            continue;
+        }
+
+        if (cell_voltage > cell_discharge_threshold) {
+            const uint8_t boardIndex = (uint8_t)(cell / cfg->numOfCellsPerIC);
+            const uint8_t localCell   = (uint8_t)(cell % cfg->numOfCellsPerIC);
+
+            if ((localCell % discharge_cell_modulo) == s_threshold_balance_counter) {
+                cell_discharge[boardIndex][localCell] = true;
+            }
+        }
+    }
+
+    s_threshold_balance_counter++;
+
+    if (s_threshold_balance_counter >= discharge_cell_modulo) {
+        s_threshold_balance_counter = 0U;
+    }
+}
+
+bool packImbalanceFault(const BMSConfigStructTypedef *cfg, const BMS_critical_info_t *bms)
+{
+    if (cfg == NULL || bms == NULL) {
+        return false;
+    }
+
+    if (bms->curr_max_voltage < bms->curr_min_voltage) {
+        return false;
+    }
+
+    return ((bms->curr_max_voltage - bms->curr_min_voltage) > cfg->max_difference);
 }
