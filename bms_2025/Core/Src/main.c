@@ -66,6 +66,8 @@ SPI_HandleTypeDef hspi1;
 SPI_HandleTypeDef hspi2;
 SPI_HandleTypeDef hspi3;
 
+SPI_HandleTypeDef* ltc_spi = &hspi1;
+
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
@@ -298,7 +300,6 @@ int main(void)
   /* USER CODE BEGIN 2 */
   initPECTable();
   loadConfig(&BMSConfig);
-  apply_project35_config_overrides(&BMSConfig);
   init_BMS_info(&BMSCriticalInfo);
 
   clear_all_discharge_requests(discharge);

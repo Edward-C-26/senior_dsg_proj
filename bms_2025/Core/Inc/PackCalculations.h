@@ -20,5 +20,6 @@ void thresholdBalance(BMSConfigStructTypedef *cfg, BMS_critical_info_t *bms,
         CellData bmsData[NUM_CELLS], bool cell_discharge[NUM_BOARDS][12],
         uint16_t cell_discharge_threshold,
         uint8_t num_cells_discharge_per_secondary);
+bool packImbalanceFault(const BMSConfigStructTypedef *cfg, const BMS_critical_info_t *bms);
 
 #endif  // PACK_CALCULATIONS

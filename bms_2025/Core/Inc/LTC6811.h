@@ -57,7 +57,7 @@ bool checkAllCellConnections(BMSConfigStructTypedef cfg, CellData bmsData[]);
 bool dischargeCellGroups(BMSConfigStructTypedef *cfg, bool cellDischarge[12][12]);
 void wakeup_idle();
 // bool dischargeCell(BMSConfigStructTypedef config, bool cellDischarge[8]);
-bool readConfig(uint8_t address, uint8_t cfg[8]);
+bool readConfig(uint8_t address, uint8_t cfg[6]);
 bool readRegister(CommandCodeTypedef command, uint8_t address, uint16_t *data);
 void sendBroadcastCommand(CommandCodeTypedef command);
 void sendAddressCommand(CommandCodeTypedef command, uint8_t address);

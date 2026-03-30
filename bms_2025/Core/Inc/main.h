@@ -41,40 +41,15 @@ extern "C" {
 
 /* Exported constants --------------------------------------------------------*/
 /* USER CODE BEGIN EC */
-#define ISOADC_TIMER_IRQ TIM1_UP_TIM10_IRQn
-#define CAN_TX_TIMER_IRQ TIM7_IRQn
-#define CAN1_RX_FIF0_IRQ CAN1_RX0_IRQn
-#define DISABLE_ALL_IRQS 						\
-	do{ 										\
-		HAL_NVIC_DisableIRQ(ISOADC_TIMER_IRQ);	\
-		HAL_NVIC_DisableIRQ(CAN_TX_TIMER_IRQ);  \
-		HAL_NVIC_DisableIRQ(CAN1_RX_FIF0_IRQ);  \
-	}while(0);
+#define DISABLE_ALL_IRQS     do { } while (0)
+#define ENABLE_ALL_IRQS      do { } while (0)
 
-#define ENABLE_ALL_IRQS 						\
-	do{ 										\
-		HAL_NVIC_EnableIRQ(ISOADC_TIMER_IRQ);	\
-		HAL_NVIC_EnableIRQ(CAN_TX_TIMER_IRQ);  \
-		HAL_NVIC_EnableIRQ(CAN1_RX_FIF0_IRQ);  \
-	}while(0);
-
-#define DISABLE_CAN_TX_TIMER_IRQ HAL_NVIC_DisableIRQ(CAN_TX_TIMER_IRQ)
-#define ENABLE_CAN_TX_TIMER_IRQ HAL_NVIC_EnableIRQ(CAN_TX_TIMER_IRQ)
-
-#define DISABLE_CAN1_RX_FIF0_IRQ HAL_NVIC_DisableIRQ(CAN_TX_TIMER_IRQ)
-#define ENABLE_CAN1_RX_FIF0_IRQ HAL_NVIC_EnableIRQ(CAN_TX_TIMER_IRQ)
-
-#define DISABLE_ALL_CAN_IRQS 						\
-		do{ 										\
-			HAL_NVIC_DisableIRQ(CAN_TX_TIMER_IRQ);  \
-			HAL_NVIC_DisableIRQ(CAN1_RX_FIF0_IRQ);  \
-		}while(0);
-
-#define ENABLE_ALL_CAN_IRQS 						\
-		do{ 										\
-			HAL_NVIC_EnableIRQ(CAN_TX_TIMER_IRQ);  	\
-			HAL_NVIC_EnableIRQ(CAN1_RX_FIF0_IRQ);  	\
-		}while(0);
+#define DISABLE_CAN_TX_TIMER_IRQ   do { } while (0)
+#define ENABLE_CAN_TX_TIMER_IRQ    do { } while (0)
+#define DISABLE_CAN1_RX_FIF0_IRQ   do { } while (0)
+#define ENABLE_CAN1_RX_FIF0_IRQ    do { } while (0)
+#define DISABLE_ALL_CAN_IRQS       do { } while (0)
+#define ENABLE_ALL_CAN_IRQS        do { } while (0)
 
 /* USER CODE END EC */
 

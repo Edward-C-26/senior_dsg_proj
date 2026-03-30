@@ -48,8 +48,10 @@ void loadConfig(BMSConfigStructTypedef* cfg) {
 
     cfg->ReferenceOn = 1;
 
-    cfg->UndervoltageComparisonVoltage = 0x000;
-    cfg->OvervoltageComparisonVoltage = 0x000;
+    // cfg->UndervoltageComparisonVoltage = 0x000;
+    // cfg->OvervoltageComparisonVoltage = 0x000;
+    cfg->UndervoltageComparisonVoltage = 1875U;
+    cfg->OvervoltageComparisonVoltage = 2625U;      
 
     for (uint8_t i = 0; i < 12; i++) {
         cfg->DischargeCell[i] = 0;
