@@ -1,765 +1,648 @@
 
-#include "main.h"
-#include "stm32f4xx.h"
-#include "stm32f4xx_hal.h"
-#include "stm32f4xx_hal_gpio.h"
 #include "LTC6811.h"
 
-#include <math.h>
-#include <stdbool.h>
-#include <stdint.h>
-#include <string.h>
+// boards will NOT be fucked in 2025 :pray: :pray:
+#define BOARD_IS_FUCKED 0 
 
-/*
- * - 1 x LTC6811
- * - 6 series cells used
- * - 2 thermistors total
- *   * thermistor 0 -> cells 1,2,3
- *   * thermistor 1 -> cells 4,5,6
- * - OV/UV support and passive balancing support
- */
+#define PEC_TABLE_SIZE 256
+#define UNDER_TEMP_LIMIT 10
+#define OVER_TEMP_LIMIT 55
 
-// PEC = Packet Error Code, the CRC scheme used by the LTC6811 for data integrity verification
-#define PEC_TABLE_SIZE              256U
-#define LTC6811_USED_CELLS          6U
-#define LTC6811_USED_THERMISTORS    2U
-#define LTC6811_CFG_BYTES           6U
-#define LTC6811_READ_FRAME_BYTES    12U
-#define LTC6811_PEC_SEED            16U
-#define CRC15_POLY                  0x4599U
+uint16_t pec15Table[PEC_TABLE_SIZE];	   // Packet Error Code
+uint16_t CRC15_POLY = 0x4599;  // Explain magic number por favor -> In datasheet :)
 
-static uint16_t pec15Table[PEC_TABLE_SIZE];
 
-/* ---------- local helpers ---------- */
-
-/*
- * Combine the low and high bytes returned by the LTC6811 into one 16-bit
- * register value.
- */
-static uint16_t ltc6811_bytes_to_u16(uint8_t low, uint8_t high)
-{
-    // Put the high byte back in the upper half and merge in the low byte.
-    return (uint16_t)(((uint16_t)high << 8) | (uint16_t)low);
-}
-
-/*
- * Clear all discharge bits in the config structure after a write has gone out.
- * That way, the next balancing request starts from a clean slate instead of
- * accidentally reusing old cell selections.
- */
-static void clear_discharge_bits(BMSConfigStructTypedef *cfg)
-{
-    for (uint8_t i = 0; i < 12U; i++) {
-        // Clear every software discharge flag so old balancing requests do not linger.
-        cfg->DischargeCell[i] = 0U;
-    }
-}
-
-/*
- * Convert a raw auxiliary ADC reading into temperature using the project's lookup table.
- * If the reading falls outside the table's supported range, mark both fault
- * outputs so the caller knows the temperature result should not be trusted.
- */
-static uint16_t convert_aux_code_to_temperature_mC(uint16_t aux_code, bool *dcFault, bool *tempFault)
-{
-    /*
-     * lookupTableTemps[] is already defined in LTC6811.h in your current codebase.
-     * We compute its size locally instead of relying on a separate macro.
-     */
-    // Figure out how many temperature entries exist in the lookup table.
-    const int lookup_table_size = (int)(sizeof(lookupTableTemps) / sizeof(lookupTableTemps[0]));
-    // Convert the raw ADC code into the scaled value used by the lookup table.
-    double scaled = ((double)aux_code) / 100.0;
-    // Shift the scaled value so it lines up with the first table entry.
-    int index = (int)lround(scaled) - 21;
-
-    if ((index < 0) || (index >= lookup_table_size)) {
-        // Flag the reading as invalid when it falls outside the supported table range.
-        *dcFault = true;
-        *tempFault = true;
-        return 0U;
-    }
-
-    // Clear the fault flags because this reading maps cleanly into the table.
-    *dcFault = false;
-    *tempFault = false;
-    // Return the table temperature in milli-degrees Celsius to match the rest of the code.
-    return (uint16_t)lookupTableTemps[index] * 1000U;
-}
-
-/* ---------- PEC ---------- */
 
 //! @brief Initializes Packet Error Code LUT by generating PEC look up table -> call on startup
 //! @returns none
-void initPECTable(void)
-{
+void initPECTable(void) {
+    uint16_t remainder;
+
     for (uint16_t i = 0; i < PEC_TABLE_SIZE; i++) {
-        // Start each entry with the current byte shifted into the CRC working position.
-        uint16_t remainder = (uint16_t)(i << 7);
-
-        for (uint8_t bit = 0; bit < 8U; bit++) {
-            if ((remainder & 0x4000U) != 0U) {
-                // If the top CRC bit is set, shift and apply the LTC6811 polynomial.
-                remainder = (uint16_t)((remainder << 1) ^ CRC15_POLY);
+        remainder = i << 7;
+        for (int bit = 8; bit > 0; bit--) {
+            if (remainder & 0x4000) {
+                remainder = ((remainder << 1));
+                remainder = (remainder ^ CRC15_POLY);
             } else {
-                // Otherwise a plain left shift moves to the next CRC step.
-                remainder = (uint16_t)(remainder << 1);
+                remainder = ((remainder << 1));
             }
         }
-
-        // Save the finished CRC remainder so later PEC calculations are faster.
-        pec15Table[i] = remainder;
+        pec15Table[i] = remainder & 0xFFFF;
     }
 }
 
-/*
- * Calculate the packet error code for a byte buffer using the LTC6811's CRC15
- * scheme.
- */
-uint16_t calculatePEC(uint8_t len, uint8_t *data)
-{
-    // Seed the CRC with the LTC6811-defined starting value.
-    uint16_t remainder = LTC6811_PEC_SEED;
+//! @brief This method is used when sending a command to calculate the necessary PEC bytes to follow command bytes. 
+//!		Should be used when receiving data to compare receieved PEC with expected PEC value
+//! @param len is the number of bytes that we will be stepping through in our data 
+//! @param data is the data that we will be using to calculate the expected PEC
+//! @returns the expected PEC value
+uint16_t calculatePEC(uint8_t len, uint8_t *data) {	 // changed to take data by value now that we are not using malloc (ensure no edit)
+	uint16_t remainder, address;
+	remainder = 16;	 // PEC seed
 
-    for (uint8_t i = 0; i < len; i++) {
-        // Combine the next data byte with the current CRC state to index the lookup table.
-        uint16_t address = (uint16_t)(((remainder >> 7) ^ data[i]) & 0x00FFU);
-        // Advance the CRC using the lookup result instead of doing the bit math every time.
-        remainder = (uint16_t)((remainder << 8) ^ pec15Table[address]);
-    }
+	for (uint8_t i = 0; i < len; i++) {
+		address = ((remainder >> 7) ^ data[i]) & 0xFF;	// calculate PEC table address
+		remainder = (remainder << 8) ^ pec15Table[address];
+	}
 
-    // The LTC6811 expects the 15-bit PEC left-aligned in the returned 16-bit field.
-    return (uint16_t)(remainder << 1);
+	return (remainder * 2);	 // The CRC15 has a 0 in the LSB so the final value must be multiplied by 2
 }
 
-/* ---------- low-level command helpers ---------- */
+//! @brief this method is used for cellDischarge in order to write configuration datra to the LTC with specified address
+//! @param cfg is the configuration struct for BMS constants 
+//! @param address is the address used to pass into our config file 
+//! @returns none 
+void writeConfigAddress(BMSConfigStructTypedef *cfg, uint8_t address) {
+//	uint8_t config[6];
+	uint8_t cmd[12];
+	uint16_t PEC_return;
+	uint8_t dummy[8];
 
-/*
- * Wake the LTC6811 by pulsing chip select.
- *
- * The part can sit idle between transactions, so many call sites use this as
- * the first step before issuing a command.
- */
-void wakeup_idle(void)
-{
-    // Use a tiny software delay while toggling chip select to wake the LTC6811.
-    volatile uint32_t delay = 1U;
-    // Pull CS low to generate the wake pulse.
-    HAL_GPIO_WritePin(SPI_UCOMM_CS_GPIO_Port, SPI_UCOMM_CS_Pin, GPIO_PIN_RESET);
-    while (delay--) {
-        // Burn a couple of cycles so the pulse is not too short.
-        __NOP();
-    }
-    // Release CS high again so normal SPI traffic can start.
-    HAL_GPIO_WritePin(SPI_UCOMM_CS_GPIO_Port, SPI_UCOMM_CS_Pin, GPIO_PIN_SET);
+//	config[0] = (uint8_t)((cfg->GPIO5PulldownOff << 7) | (cfg->GPIO4PulldownOff << 6) | (cfg->GPIO3PulldownOff << 5) | (cfg->GPIO2PulldownOff << 4) | (cfg->GPIO1PulldownOff << 3) | (cfg->ReferenceOn << 2) | (cfg->ADCModeOption));
+//	config[1] = (uint8_t)(cfg->UndervoltageComparisonVoltage & 0xFF);
+//	config[2] = (uint8_t)(((cfg->OvervoltageComparisonVoltage << 4) & 0xF0) | ((cfg->UndervoltageComparisonVoltage >> 8) & 0x0F));
+//	config[3] = (uint8_t)((cfg->OvervoltageComparisonVoltage >> 4) & 0xFF);
+//	config[4] = (uint8_t)((cfg->DischargeCell[7] << 7) | (cfg->DischargeCell[6] << 6) | (cfg->DischargeCell[5] << 5) | (cfg->DischargeCell[4] << 4) | (cfg->DischargeCell[3] << 3) | (cfg->DischargeCell[2] << 2) | (cfg->DischargeCell[1] << 1) | (cfg->DischargeCell[0]));
+//	config[5] = (uint8_t)(((cfg->DischargeTimeoutValue << 4) & 0xF0) | (cfg->DischargeCell[11] << 3) | (cfg->DischargeCell[10] << 2) | (cfg->DischargeCell[9] << 1) | (cfg->DischargeCell[8]));
+
+	cmd[0] = (uint8_t)((0x80 | ((address << 3) & 0x78) | ((WriteConfigurationRegisterGroup >> 8) & 0x07)));
+	cmd[1] = (uint8_t)(WriteConfigurationRegisterGroup & 0xFF);
+
+	PEC_return = calculatePEC(2, cmd);
+
+	cmd[2] = (uint8_t)((PEC_return >> 8) & 0xFF);
+	cmd[3] = (uint8_t)(PEC_return & 0xFF);
+
+//	memcpy(&cmd[4], config, 6 * sizeof(config[0]));
+
+	cmd[4] = (uint8_t)((cfg->GPIO5PulldownOff << 7) | (cfg->GPIO4PulldownOff << 6) | (cfg->GPIO3PulldownOff << 5) | (cfg->GPIO2PulldownOff << 4) | (cfg->GPIO1PulldownOff << 3) | (cfg->ReferenceOn << 2) | (cfg->ADCModeOption));
+	cmd[5] = (uint8_t)(cfg->UndervoltageComparisonVoltage & 0xFF);
+	cmd[6] = (uint8_t)(((cfg->OvervoltageComparisonVoltage << 4) & 0xF0) | ((cfg->UndervoltageComparisonVoltage >> 8) & 0x0F));
+	cmd[7] = (uint8_t)((cfg->OvervoltageComparisonVoltage >> 4) & 0xFF);
+	cmd[8] = (uint8_t)((cfg->DischargeCell[7] << 7) | (cfg->DischargeCell[6] << 6) | (cfg->DischargeCell[5] << 5) | (cfg->DischargeCell[4] << 4) | (cfg->DischargeCell[3] << 3) | (cfg->DischargeCell[2] << 2) | (cfg->DischargeCell[1] << 1) | (cfg->DischargeCell[0]));
+	cmd[9] = (uint8_t)(((cfg->DischargeTimeoutValue << 4) & 0xF0) | (cfg->DischargeCell[11] << 3) | (cfg->DischargeCell[10] << 2) | (cfg->DischargeCell[9] << 1) | (cfg->DischargeCell[8]));
+
+	PEC_return = calculatePEC(6, cmd + 4);
+
+	cmd[10] = (uint8_t)((PEC_return >> 8) & 0xFF);
+	cmd[11] = (uint8_t)(PEC_return & 0xFF);
+
+	SPIWrite(cmd, sizeof(cmd));
+
+	readConfig(address, dummy);
+
 }
 
-/*
- * Send a command frame to every LTC device on the bus.
- */
-void sendBroadcastCommand(CommandCodeTypedef command)
-{
-    // Build the 4-byte command frame: 2 command bytes followed by 2 PEC bytes.
-    uint8_t cmd[4];
-    uint16_t pec;
+//! @brief This function is called every loop to accommodate dischargeCells method 
+//!		Specifically writes configuration data (UV, OV, ADCMode, etc) to BMSConfig struct
+//! @param cfg is the configuration files for the constants in the BMS system
+//! @returns none
+void writeConfigAll(BMSConfigStructTypedef *cfg) {
+	wakeup_idle();
 
-    // Split the command enum into the upper and lower command bytes.
-    cmd[0] = (uint8_t)((command >> 8) & 0x0FU);
-    cmd[1] = (uint8_t)(command & 0xFFU);
-
-    // Compute the PEC over the command bytes before transmitting.
-    pec = calculatePEC(2U, cmd);
-    cmd[2] = (uint8_t)((pec >> 8) & 0xFFU);
-    cmd[3] = (uint8_t)(pec & 0xFFU);
-
-    // Send the same command to every LTC6811 on the shared bus.
-    SPIWrite(cmd, sizeof(cmd));
+	for (uint8_t i = 0; i < cfg->numOfICs; i++) {
+		writeConfigAddress(cfg, cfg->address[i]);
+	}
 }
 
-/*
- * Send a command frame to one addressed LTC device.
- *
- * The device address is folded into the command header before the PEC is generated.
- */
-void sendAddressCommand(CommandCodeTypedef command, uint8_t address)
-{
-    // Build a command frame that targets one specific LTC6811 address.
-    uint8_t cmd[4];
-    uint8_t bytes[2];
-    uint16_t pec;
+//! @brief This function sends an ADCV command that begins conversion for every cell to specified LTC. 
+//!		This results in the function readings all cell voltage registers using the readRegister function. 
+//! @param address is the address of the board that will be read 
+//! @param cellVoltage is the array that will store the voltages of all the cells on the board being read
+//! @returns true if PEC matches expected PEC value, else false 
+bool readCellVoltage(uint8_t address, uint16_t cellVoltage[12]) {
+	bool PEC_check = false;
+	bool dataValid = true;
+	uint16_t voltage[12];
+	//board 11 is fucked 
+	if (BOARD_IS_FUCKED && address == 11){
+		PEC_check = readRegister(ReadCellVoltageRegisterGroup1to3, address, voltage);
+		dataValid = dataValid & PEC_check;
 
-    // Pack the address bits into the first command byte alongside the opcode bits.
-    bytes[0] = (uint8_t)(0x80U | ((address << 3) & 0x78U) | ((command >> 8) & 0x07U));
-    bytes[1] = (uint8_t)(command & 0xFFU);
+		PEC_check = readRegister(ReadCellVoltageRegisterGroup4to6, address, voltage);
+		dataValid = dataValid & PEC_check;
 
-    // Copy the command header into the transmit buffer.
-    cmd[0] = bytes[0];
-    cmd[1] = bytes[1];
+		PEC_check = readRegister(ReadCellVoltageRegisterGroup7to9, address, voltage);
+		dataValid = dataValid & PEC_check;
+		
+		PEC_check = readRegister(ReadCellVoltageRegisterGroup10to12, address, voltage);
+		dataValid = dataValid & PEC_check;
 
-    // Generate the PEC from the addressed command header.
-    pec = calculatePEC(2U, bytes);
-    cmd[2] = (uint8_t)((pec >> 8) & 0xFFU);
-    cmd[3] = (uint8_t)(pec & 0xFFU);
 
-    // Push the addressed command frame over SPI.
-    SPIWrite(cmd, sizeof(cmd));
+		//THIS IS TERRIBLE PRACTICE BE CAREFUL
+		voltage[1] = voltage[5];
+//		voltage[1] = 44000;
+
+		voltage[2] = voltage[5];
+		voltage[11] = voltage[5];
+
+
+	} else {
+	
+		PEC_check = readRegister(ReadCellVoltageRegisterGroup1to3, address, voltage);
+		dataValid = dataValid & PEC_check;
+
+		PEC_check = readRegister(ReadCellVoltageRegisterGroup4to6, address, voltage);
+		dataValid = dataValid & PEC_check;
+
+		PEC_check = readRegister(ReadCellVoltageRegisterGroup7to9, address, voltage);
+		dataValid = dataValid & PEC_check;
+
+		PEC_check = readRegister(ReadCellVoltageRegisterGroup10to12, address, voltage);
+		dataValid = dataValid & PEC_check;
+	}
+
+	memcpy(cellVoltage, voltage, sizeof(voltage));
+
+	return dataValid;
 }
 
-/*
- * Read one register group from the addressed LTC device and unpack the
- * returned bytes into the caller's data buffer.
- *
- * For normal data reads, the function verifies the returned PEC so the caller
- * can tell whether the SPI transaction was trustworthy.
- */
-bool readRegister(CommandCodeTypedef command, uint8_t address, uint16_t *data)
-{
-    // Prepare a full-duplex frame with room for the command, returned data, and returned PEC.
-    uint8_t tx[LTC6811_READ_FRAME_BYTES] = {0};
-    uint8_t rx[LTC6811_READ_FRAME_BYTES] = {0};
-    uint8_t cmd_bytes[2];
-    uint8_t pec_data[6];
-    uint16_t expected_pec;
-    uint16_t received_pec;
+//! @brief This function reads all cell voltages by essentially parsing each board and reading the individual cell voltages. These are then 
+//!		stored in the bmsData array, along with the cell number that is associated with the reading. 
+//! @param bmsData is an array of 144 cellData structs, containing index, fault, voltage and temperature
+//! @returns true if no PEC for any register read for any board 
+bool readAllCellVoltages(CellData bmsData[]) {
+	// DEAR WHOEVER READS/ RUNS THIS CODE
+	// DO NOT BREAKPOINT HERE UNLESS YOU WANT TO GOOF TIMING UP
+	uint16_t boardVoltage[12];
+	bool PEC_check[12];
+	bool dataValid = true;
 
-    // Pack the addressed read command exactly the way the LTC6811 expects it.
-    cmd_bytes[0] = (uint8_t)(0x80U | ((address << 3) & 0x78U) | ((command >> 8) & 0x07U));
-    cmd_bytes[1] = (uint8_t)(command & 0xFFU);
+	wakeup_idle();
+	HAL_Delay(2);
 
-    // Place the command header at the front of the transmit frame.
-    tx[0] = cmd_bytes[0];
-    tx[1] = cmd_bytes[1];
+	sendBroadcastCommand(ClearRegisters);
+	sendBroadcastCommand(StartCellVoltageADCConversionAll);
+	HAL_Delay(10);
 
-    // Append the PEC for the command so the LTC6811 will accept the request.
-    expected_pec = calculatePEC(2U, cmd_bytes);
-    tx[2] = (uint8_t)((expected_pec >> 8) & 0xFFU);
-    tx[3] = (uint8_t)(expected_pec & 0xFFU);
+	wakeup_idle();
+	HAL_Delay(2);
 
-    // Clock out the command while simultaneously capturing the device response.
-    SPIWriteRead(tx, rx, sizeof(tx));
+//	uint16_t allVoltages[144];
 
-    for (uint8_t i = 0; i < 6U; i++) {
-        // Copy just the returned register payload bytes for the PEC check.
-        pec_data[i] = rx[4U + i];
-    }
 
-    // Recalculate the PEC over the returned data bytes.
-    expected_pec = calculatePEC(6U, pec_data);
-    // Rebuild the PEC that came back from the LTC6811.
-    received_pec = (uint16_t)(((uint16_t)rx[10] << 8) | rx[11]);
+	for (uint8_t board = 0; board < NUM_BOARDS; board++) {
 
-    if (command == ReadCellVoltageRegisterGroup1to3) {
-        // Group A holds cells 1 through 3.
-        data[0] = ltc6811_bytes_to_u16(rx[4], rx[5]);
-        data[1] = ltc6811_bytes_to_u16(rx[6], rx[7]);
-        data[2] = ltc6811_bytes_to_u16(rx[8], rx[9]);
-    } else if (command == ReadCellVoltageRegisterGroup4to6) {
-        // Group B holds cells 4 through 6 for this 6-cell setup.
-        data[3] = ltc6811_bytes_to_u16(rx[4], rx[5]);
-        data[4] = ltc6811_bytes_to_u16(rx[6], rx[7]);
-        data[5] = ltc6811_bytes_to_u16(rx[8], rx[9]);
-    } else if (command == ReadAuxiliaryGroupA) {
-        // Auxiliary group A carries the first three AUX readings.
-        data[0] = ltc6811_bytes_to_u16(rx[4], rx[5]);
-        data[1] = ltc6811_bytes_to_u16(rx[6], rx[7]);
-        data[2] = ltc6811_bytes_to_u16(rx[8], rx[9]);
-    } else if (command == ReadAuxiliaryGroupB) {
-        // Auxiliary group B is only used here for the fourth AUX reading.
-        data[3] = ltc6811_bytes_to_u16(rx[4], rx[5]);
-    } else if (command == ReadConfigurationRegisterGroup) {
-        // Return the raw configuration bytes so higher-level code can unpack them later.
-        data[0] = (uint16_t)(((uint16_t)rx[4] << 8) | rx[5]);
-        data[1] = (uint16_t)(((uint16_t)rx[6] << 8) | rx[7]);
-        data[2] = (uint16_t)(((uint16_t)rx[8] << 8) | rx[9]);
-        data[3] = (uint16_t)(((uint16_t)rx[10] << 8) | rx[11]);
-    }
+		// read voltage of every cell input (1-12) for a specific address, store in boardVoltage
+		PEC_check[board] = readCellVoltage(board, boardVoltage);
 
-    // Only report success when the returned data PEC matches what we calculated locally.
-    return (expected_pec == received_pec);
-}
 
-/* ---------- config ---------- */
+		dataValid &= PEC_check[board];
 
-/*
- * Pack the current software configuration into the exact byte layout expected
- * by the LTC6811 and write it to one addressed device.
- */
-void writeConfigAddress(BMSConfigStructTypedef *cfg, uint8_t address)
-{
-    // Build the full addressed write frame: command, command PEC, config bytes, and data PEC.
-    uint8_t cmd[12];
-    uint16_t pec;
-    // uint8_t dummy[8];
+		// store cell number and valid data bit in bmsData
+		for (uint8_t cell = 0; cell < NUM_BOARDS; cell++) {
+			bmsData[(board * NUM_BOARDS) + cell].voltage = (uint8_t)((board * NUM_BOARDS) + cell + 1);  // cell number
 
-    // Put the addressed write-config opcode into the first two bytes.
-    cmd[0] = (uint8_t)(0x80U | ((address << 3) & 0x78U) | ((WriteConfigurationRegisterGroup >> 8) & 0x07U));
-    cmd[1] = (uint8_t)(WriteConfigurationRegisterGroup & 0xFFU);
-
-    // Protect the command header with its own PEC.
-    pec = calculatePEC(2U, cmd);
-    cmd[2] = (uint8_t)((pec >> 8) & 0xFFU);
-    cmd[3] = (uint8_t)(pec & 0xFFU);
-
-    // Pack the first config byte with GPIO pull-down settings and ADC/reference control bits.
-    cmd[4] = (uint8_t)((cfg->GPIO5PulldownOff << 7) |
-                       (cfg->GPIO4PulldownOff << 6) |
-                       (cfg->GPIO3PulldownOff << 5) |
-                       (cfg->GPIO2PulldownOff << 4) |
-                       (cfg->GPIO1PulldownOff << 3) |
-                       (cfg->ReferenceOn << 2) |
-                       (cfg->ADCModeOption));
-
-    // Store the lower 8 bits of the undervoltage threshold.
-    cmd[5] = (uint8_t)(cfg->UndervoltageComparisonVoltage & 0xFFU);
-    // Pack the upper UV bits together with the lower OV bits.
-    cmd[6] = (uint8_t)(((cfg->OvervoltageComparisonVoltage << 4) & 0xF0U) |
-                       ((cfg->UndervoltageComparisonVoltage >> 8) & 0x0FU));
-    // Store the remaining OV threshold bits.
-    cmd[7] = (uint8_t)((cfg->OvervoltageComparisonVoltage >> 4) & 0xFFU);
-
-    // Pack discharge-enable bits for cells 1 through 8.
-    cmd[8] = (uint8_t)((cfg->DischargeCell[7] << 7) |
-                       (cfg->DischargeCell[6] << 6) |
-                       (cfg->DischargeCell[5] << 5) |
-                       (cfg->DischargeCell[4] << 4) |
-                       (cfg->DischargeCell[3] << 3) |
-                       (cfg->DischargeCell[2] << 2) |
-                       (cfg->DischargeCell[1] << 1) |
-                       (cfg->DischargeCell[0]));
-
-    // Pack discharge-enable bits for cells 9 through 12 plus the discharge timeout.
-    cmd[9] = (uint8_t)(((cfg->DischargeTimeoutValue << 4) & 0xF0U) |
-                       (cfg->DischargeCell[11] << 3) |
-                       (cfg->DischargeCell[10] << 2) |
-                       (cfg->DischargeCell[9] << 1) |
-                       (cfg->DischargeCell[8]));
-
-    // Calculate the PEC for the six configuration bytes only.
-    pec = calculatePEC(LTC6811_CFG_BYTES, &cmd[4]);
-    cmd[10] = (uint8_t)((pec >> 8) & 0xFFU);
-    cmd[11] = (uint8_t)(pec & 0xFFU);
-
-    // Send the completed config frame to the selected LTC6811.
-    SPIWrite(cmd, sizeof(cmd));
-    //readConfig(address, dummy);
-}
-
-/*
- * Write the current config to every LTC device listed in the BMS config.
- */
-void writeConfigAll(BMSConfigStructTypedef *cfg)
-{
-    // Wake the bus once before stepping through every LTC6811 board.
-    wakeup_idle();
-
-    for (uint8_t i = 0; i < cfg->numOfICs; i++) {
-        // Reuse the same config struct while targeting each board address in turn.
-        writeConfigAddress(cfg, cfg->address[i]);
-    }
-}
-
-/*
- * Read back the configuration bytes from one LTC device.
- * This is useful as a sanity check after writing new settings.
- */
-bool readConfig(uint8_t address, uint8_t cfg[6])
-{
-    uint16_t raw[3] = {0};
-    bool ok;
-
-    wakeup_idle();
-    ok = readRegister(ReadConfigurationRegisterGroup, address, raw);
-
-    cfg[0] = (uint8_t)((raw[0] >> 8) & 0xFFU);
-    cfg[1] = (uint8_t)(raw[0] & 0xFFU);
-    cfg[2] = (uint8_t)((raw[1] >> 8) & 0xFFU);
-    cfg[3] = (uint8_t)(raw[1] & 0xFFU);
-    cfg[4] = (uint8_t)((raw[2] >> 8) & 0xFFU);
-    cfg[5] = (uint8_t)(raw[2] & 0xFFU);
-
-    return ok;
-}
-
-/* ---------- cell voltage ---------- */
-
-/*
- * Read the two voltage register groups that cover the six active cells in this
- * reduced pack layout.
- */
-bool readCellVoltage(uint8_t address, uint16_t cellVoltage[6])
-{
-    // Hold both voltage register groups before copying only the used cell entries out.
-    uint16_t raw[12] = {0};
-    bool ok_a;
-    bool ok_b;
-
-    // Read the first three cell voltages from register group A.
-    ok_a = readRegister(ReadCellVoltageRegisterGroup1to3, address, raw);
-    // Read the next three cell voltages from register group B.
-    ok_b = readRegister(ReadCellVoltageRegisterGroup4to6, address, raw);
-
-    for (uint8_t i = 0; i < LTC6811_USED_CELLS; i++) {
-        // Copy the packed raw readings into the caller's 6-cell buffer.
-        cellVoltage[i] = raw[i];
-    }
-
-    // Both register reads must pass PEC for the overall voltage read to count as valid.
-    return (ok_a && ok_b);
-}
-
-/*
- * Start a fresh voltage conversion on every board and copy the returned values
- * into the shared CellData array used by the rest of the application.
- *
- * The per-cell PEC fault bit is refreshed at the same time so later logic can
- * tell whether the most recent read was valid.
- */
-bool readAllCellVoltages(CellData bmsData[])
-{
-    // Reuse one per-board buffer while walking through all secondary boards.
-    uint16_t boardVoltage[6] = {0};
-    bool dataValid = true;
-
-    // Wake the chain before starting a new conversion cycle.
-    wakeup_idle();
-    HAL_Delay(2);
-
-    // Clear old conversion results, then trigger a fresh cell-voltage conversion on every board.
-    sendBroadcastCommand(ClearRegisters);
-    sendBroadcastCommand(StartCellVoltageADCConversionAll);
-    HAL_Delay(10);
-
-    // Wake the parts again before starting the readback phase.
-    wakeup_idle();
-    HAL_Delay(2);
-
-    for (uint8_t board = 0; board < NUM_BOARDS; board++) {
-        // Read one board's six cell voltages and remember whether the PEC checked out.
-        bool pec_ok = readCellVoltage(board, boardVoltage);
-        dataValid &= pec_ok;
-
-        for (uint8_t cell = 0; cell < LTC6811_USED_CELLS; cell++) {
-            // Convert the local cell index on this board into the flattened pack index.
-            uint8_t globalCell = (uint8_t)(board * LTC6811_USED_CELLS + cell);
-
-            // Store the newest measured voltage for this cell.
-            bmsData[globalCell].voltage = boardVoltage[cell];
-
-            if (pec_ok) {
-                // Clear the PEC fault bit when this board's read was valid.
-                bmsData[globalCell].fault &= (uint8_t)(~CELL_PEC_FAIL_MASK);
+			if (!PEC_check[board]) {
+				bmsData[(board * NUM_BOARDS) + cell].fault |= CELL_PEC_FAIL_MASK;
             } else {
-                // Set the PEC fault bit so higher-level logic knows this voltage read is suspect.
-                bmsData[globalCell].fault |= CELL_PEC_FAIL_MASK;
-            }
-        }
-    }
-
-    return dataValid;
-}
-
-/* ---------- temperature ---------- */
-
-/*
- * Read the auxiliary channels used as thermistor inputs and convert them into
- * milli-degree Celsius values.
- *
- * This project maps one thermistor to cells 1-3 and the other to cells 4-6.
- */
-bool readCellTemp(uint8_t address, uint16_t cellTemp[2], bool dcFault[2], bool tempFault[2])
-{
-    // AUX group A is enough for this design because only two thermistors are used.
-    uint16_t aux[4] = {0};
-    bool ok;
-
-    // Read the AUX channels tied to the thermistor divider circuits.
-    ok = readRegister(ReadAuxiliaryGroupA, address, aux);
-
-    /*
-     * For your 6S design:
-     * - AUX A channel 1 -> thermistor for cells 1-3
-     * - AUX A channel 2 -> thermistor for cells 4-6
-     */
-    for (uint8_t i = 0; i < LTC6811_USED_THERMISTORS; i++) {
-        // Convert each thermistor ADC code into temperature and its associated validity flags.
-        cellTemp[i] = convert_aux_code_to_temperature_mC(aux[i], &dcFault[i], &tempFault[i]);
-    }
-
-    // Return whether the underlying AUX register read passed the PEC check.
-    return ok;
-}
-
-/*
- * Start a fresh temperature conversion on every board and map the resulting
- * thermistor values onto each cell entry in the shared CellData array.
- *
- * Because multiple cells share each thermistor, the same temperature is copied
- * into each cell in that group, along with any corresponding fault flags.
- */
-bool readAllCellTemps(CellData bmsData[])
-{
-    // Reuse one board-sized set of temperature and fault buffers across the loop.
-    uint16_t boardTemp[2] = {0};
-    bool boardDcFault[2] = {false, false};
-    bool boardTempFault[2] = {false, false};
-    bool dataValid = true;
-
-    // Wake the LTC chain before starting a new AUX conversion.
-    wakeup_idle();
-    HAL_Delay(2);
-
-    // Clear stale data, then start a new temperature conversion on every board.
-    sendBroadcastCommand(ClearRegisters);
-    sendBroadcastCommand(StartCellTempVoltageADCConversionAll);
-    HAL_Delay(20);
-
-    // Wake the parts again before reading the finished conversion results.
-    wakeup_idle();
-    HAL_Delay(2);
-
-    for (uint8_t board = 0; board < NUM_BOARDS; board++) {
-        // Read one board's thermistor values and remember whether the PEC was valid.
-        bool pec_ok = readCellTemp(board, boardTemp, boardDcFault, boardTempFault);
-        dataValid &= pec_ok;
-
-        for (uint8_t cell = 0; cell < LTC6811_USED_CELLS; cell++) {
-            // Map the local board cell index into the flattened pack index.
-            uint8_t globalCell = (uint8_t)(board * LTC6811_USED_CELLS + cell);
-            // Cells 1-3 share thermistor 0 and cells 4-6 share thermistor 1.
-            uint8_t therm_idx = (cell < 3U) ? 0U : 1U;
-
-            // Copy the shared thermistor temperature onto each cell in that group.
-            bmsData[globalCell].temperature = boardTemp[therm_idx];
-
-            if (pec_ok) {
-                // Clear the PEC fault when the AUX read came back clean.
-                bmsData[globalCell].fault &= (uint8_t)(~CELL_PEC_FAIL_MASK);
-            } else {
-                // Mark the reading as suspect when the AUX PEC does not match.
-                bmsData[globalCell].fault |= CELL_PEC_FAIL_MASK;
+				bmsData[(board * NUM_BOARDS) + cell].fault &= (uint8_t)(~CELL_PEC_FAIL_MASK);
             }
 
-            if (boardTempFault[therm_idx]) {
-                // Flag temperatures that fell outside the supported lookup range.
-                bmsData[globalCell].fault |= CELL_TEMP_FAIL_MASK;
+			bmsData[(board * NUM_BOARDS) + cell].voltage = boardVoltage[cell];
+		}
+	}
+
+
+	return dataValid;  // return true if no PEC errors for any board
+}
+
+//! @brief This function initiates ADC conversion for GPIO inputs connected to temperature sensors. 
+//!		Reads auxiliary register groups using readRegister function. Then, converts measured voltage into temperature 
+//!			based on temperature sensor response. Also checks for disconnected temperature sensor and OT faults. 
+//!				NOTE: We only read 4 temps per board, and they are the 4 highest temps on each board.
+//! @param address is the address of the board being read
+//! @param cellTemp is the array that will hold the cell temps read during readRegister
+//! @param dcFault is the array that stores temperature sensor ceonnection for all cells read 
+//! @param tempFault stores OT fault info for each cell read 
+//! @returns true if PEC value read matches expected PEC value calculated. Otherwise, false. 
+bool readCellTemp(uint8_t address, uint16_t cellTemp[4], bool dcFault[4], bool tempFault[4]) {
+	bool PEC_check = false;
+	bool dataValid = true;
+	uint16_t temp[4];
+//	double realTemp[4];
+
+	for (uint8_t i = 0; i < 4; i++) {
+		temp[i] = 0;
+//		realTemp[i] = 0.0;
+	}
+
+
+	//30 to 50c 
+
+	PEC_check = readRegister(ReadAuxiliaryGroupA, address, temp);
+	dataValid = dataValid & PEC_check;
+
+	PEC_check = readRegister(ReadAuxiliaryGroupB, address, temp);
+	dataValid = dataValid & PEC_check;
+
+	//float minimalVoltage = 0.2083; //will remove -> this is the lowest temp we can read that we care about
+
+	for (uint8_t i = 0; i < 4; i++){
+			// uint8_t truncatedADC = ((cellTemp[i] >> 6) << 6); //remove 8 most lsb bits (since ADC is 12 bit resolution this is actually removing the 2 most LSB) from the adc reading to get eventual 3 digit resolution
+			double first = temp[i]/100;
+			uint16_t second = (uint16_t)round(first);
+			int index = second - 21;//convert adc to integer
+			//if (index > 203 || index < 0) {
+			//cellTemp[i] = 20*1000;
+            uint16_t lookupVal = (uint16_t)lookupTableTemps[index];
+			cellTemp[i] =  lookupVal * 1000;
+
+		
+			dcFault[i] = false;
+			tempFault[i] = ((lookupVal < UNDER_TEMP_LIMIT) 
+                    || OVER_TEMP_LIMIT < lookupVal) ? true : false;
+		
+		}
+
+		return (dataValid);
+
+}
+
+//! @brief This function reads cell temps from all of our board by calling readCellTemp for each board. NOTE : This is not proven to work properly yet.
+//! @param bmsData is an array of 144 cellData structs, containing index, fault, voltage and temperature
+//! @returns true if PEC value received matches expected PEC value. Otherwise, false. -> i.e., returns false if any readCellTemp return values are false. 
+bool readAllCellTemps(CellData bmsData[]) {
+	uint16_t boardTemp[4];
+	bool boardDCFault[4];
+	bool boardTempFault[4];
+	bool PEC_check[12];
+	bool dataValid = true;
+
+	wakeup_idle();
+	HAL_Delay(2);
+
+	sendBroadcastCommand(ClearRegisters);
+	sendBroadcastCommand(StartCellTempVoltageADCConversionAll);
+	HAL_Delay(20);
+
+	wakeup_idle();
+	HAL_Delay(2);
+
+	for (uint8_t board = 0; board < NUM_BOARDS; board++) {
+		// read temperature, check for OT and temp DC
+		PEC_check[board] = readCellTemp(board, boardTemp, boardDCFault, boardTempFault);
+		dataValid &= PEC_check[board];
+
+		// store OT and temp DC bits in status byte
+		for (uint8_t cell = 0; cell < 12; cell++) {
+			if (!PEC_check[board]) {
+				bmsData[(board * 12) + cell].fault |= CELL_PEC_FAIL_MASK;
             } else {
-                // Clear the temp fault once the mapped thermistor reading is valid again.
-                bmsData[globalCell].fault &= (uint8_t)(~CELL_TEMP_FAIL_MASK);
+				bmsData[(board * 12) + cell].fault &= (uint8_t)(~CELL_PEC_FAIL_MASK);
             }
 
-            if (boardDcFault[therm_idx]) {
-                // Carry forward the thermistor disconnect-style fault for all cells on that sensor.
-                bmsData[globalCell].fault |= CELL_DCFAULT_MASK;
+			if (boardTempFault[cell / 3]) {
+				bmsData[(board * 12) + cell].fault |= CELL_TEMP_FAIL_MASK;
             } else {
-                // Clear the disconnect-style fault when the thermistor reading looks healthy.
-                bmsData[globalCell].fault &= (uint8_t)(~CELL_DCFAULT_MASK);
+				bmsData[(board * 12) + cell].fault &= (uint8_t)(~CELL_TEMP_FAIL_MASK);	// set OT bit
             }
-        }
-    }
 
-    return dataValid;
-}
-
-/* ---------- balancing ---------- */
-
-/*
- * Push the caller's requested discharge pattern out to the LTC6811 config
- * registers for each board.
- *
- * After the write completes, the temporary discharge bits inside the config
- * struct are cleared so the next call starts fresh.
- */
-bool dischargeCellGroups(BMSConfigStructTypedef *cfg, bool cellDischarge[12][12])
-{
-    // Wake the parts before pushing out any new balancing selections.
-    wakeup_idle();
-
-    for (uint8_t board = 0; board < cfg->numOfICs; board++) {
-        for (uint8_t cell = 0; cell < 12U; cell++) {
-            // Copy this board's requested discharge pattern into the config struct.
-            cfg->DischargeCell[cell] = cellDischarge[board][cell];
-        }
-
-        // Write the updated discharge bits to the current board.
-        writeConfigAddress(cfg, cfg->address[board]);
-    }
-
-    // Reset the software copy of the discharge bits so the next request starts clean.
-    clear_discharge_bits(cfg);
-    return true;
-}
-
-/* ---------- optional/open-wire ---------- */
-
-/*
- * Run the open-wire diagnostic sequence and compare the result against the
- * stored normal-voltage readings.
- *
- * A significant drop during the pulldown test is treated as a likely open cell
- * connection and sets the disconnect fault bit for that cell.
- */
-bool checkAllCellConnections(BMSConfigStructTypedef cfg, CellData bmsData[])
-{
-    // Store the pulldown-test voltages for one board at a time.
-    uint16_t adowVoltage[12] = {0};
-    bool dataValid = true;
-
-    // Wake the chain and clear any stale conversion state before the diagnostic.
-    wakeup_idle();
-    sendBroadcastCommand(ClearRegisters);
-
-    /*
-     * The repeated ADOW pulldown command pattern was retained from your original file.
-     * This routine is still optional and mainly diagnostic.
-     */
-    for (uint8_t i = 0; i < 5U; i++) {
-        // Repeat the pulldown conversion command to follow the existing open-wire routine.
-        sendBroadcastCommand(StartOpenWireConversionPulldown);
-    }
-
-    // Give the open-wire conversion sequence time to finish.
-    HAL_Delay(20);
-    wakeup_idle();
-
-    for (uint8_t board = 0; board < cfg.numOfICs; board++) {
-        // Read back the pulldown-test voltages for this board.
-        bool ok = readCellVoltage(cfg.address[board], adowVoltage);
-        dataValid &= ok;
-
-        for (uint8_t cell = 0; cell < cfg.numOfCellsPerIC; cell++) {
-            // Convert the board-local index into the flattened pack index.
-            uint8_t globalCell = (uint8_t)(board * cfg.numOfCellsPerIC + cell);
-            // Compare the pulldown reading against the previously stored normal voltage.
-            uint16_t storedVoltage = bmsData[globalCell].voltage;
-
-            if ((storedVoltage > adowVoltage[cell]) &&
-                ((storedVoltage - adowVoltage[cell]) >= 1000U)) {
-                // A large drop during pulldown suggests an open connection on this cell input.
-                bmsData[globalCell].fault |= CELL_DISCONNECT_MASK;
+			if (boardDCFault[cell / 3]) {
+				bmsData[(board * 12) + cell].fault |= CELL_DCFAULT_MASK;
             } else {
-                // Clear the disconnect flag when the pulldown result looks normal.
-                bmsData[globalCell].fault &= (uint8_t)(~CELL_DISCONNECT_MASK);
+				bmsData[(board * 12) + cell].fault &= (uint8_t)(~CELL_DCFAULT_MASK);
             }
-        }
-    }
 
-    return dataValid;
+			bmsData[(board * 12) + cell].temperature = boardTemp[cell / 3];
+		}
+	}
+
+	return dataValid;
 }
 
-/* ---------- single-board poll helpers used by main ---------- */
+//! @brief This method uses general readRegister function to check current state of LTC configuration reg. 
+//!		Mostly used for testing purposes
+//! @param address is the address passed into the readRegister function
+//! @param cfg is part of the configuration that will be passed to check the current state of the LTC
+//! @returns true if the received PEC from readRegister mathes the calculated PEC 
+bool readConfig(uint8_t address, uint8_t cfg[8]) {
+	uint16_t config[4];
+	bool dataValid = false;
 
-/*
- * Poll one board's cell voltages and copy them into the global CellData array
- * used by main.c.
- */
-bool poll_single_secondary_voltage_reading(uint8_t board_num,
-                                          BMSConfigStructTypedef *cfg,
-                                          CellData bmsData[])
-{
-    // Hold just one board's voltage readings for this polling pass.
-    uint16_t boardVoltage[6] = {0};
-    bool dataValid;
+	wakeup_idle();
 
-    // Wake the addressed board and rewrite its config before starting the conversion.
-    wakeup_idle();
-    writeConfigAddress(cfg, cfg->address[board_num]);
+	dataValid = readRegister(ReadConfigurationRegisterGroup, address, config);
 
-    // Clear old data, then trigger a new voltage conversion across the chain.
-    sendBroadcastCommand(ClearRegisters);
-    sendBroadcastCommand(StartCellVoltageADCConversionAll);
+	cfg[0] = (uint8_t)((config[0] >> 8) & 0xFF);
+	cfg[1] = (uint8_t)(config[0] & 0xFF);
+	cfg[2] = (uint8_t)((config[1] >> 8) & 0xFF);
+	cfg[3] = (uint8_t)(config[1] & 0xFF);
+	cfg[4] = (uint8_t)((config[2] >> 8) & 0xFF);
+	cfg[5] = (uint8_t)(config[2] & 0xFF);
+	cfg[6] = (uint8_t)((config[3] >> 8) & 0xFF);
+	cfg[7] = (uint8_t)(config[3] & 0xFF);
 
-    // Wait briefly for the conversion to complete, then wake the chain again for the read.
-    HAL_Delay(3);
-    wakeup_idle();
-    HAL_Delay(1);
-
-    // Read only the requested board's six cell voltages.
-    dataValid = readCellVoltage(cfg->address[board_num], boardVoltage);
-
-    for (uint8_t cell = 0; cell < LTC6811_USED_CELLS; cell++) {
-        // Convert the board-local index into the flattened pack index.
-        uint8_t globalCell = (uint8_t)(board_num * LTC6811_USED_CELLS + cell);
-        // Store the newest voltage for this cell.
-        bmsData[globalCell].voltage = boardVoltage[cell];
-
-        if (dataValid) {
-            // Clear the PEC fault bit when this read succeeds.
-            bmsData[globalCell].fault &= (uint8_t)(~CELL_PEC_FAIL_MASK);
-        } else {
-            // Set the PEC fault bit when the returned frame fails validation.
-            bmsData[globalCell].fault |= CELL_PEC_FAIL_MASK;
-        }
-    }
-
-    return dataValid;
+	return dataValid;
 }
 
-/*
- * Poll one board's thermistor channels and update the corresponding cell
- * entries in the shared CellData array.
- *
- * This helper also refreshes the PEC, dc-fault, and temp-fault bits so the
- * fault logic can work from a single source of truth.
- */
-bool poll_single_secondary_temp_reading(uint8_t board_num,
-                                       BMSConfigStructTypedef *cfg,
-                                       CellData bmsData[])
-{
-    // Hold one board's thermistor temperatures and fault flags for this poll.
-    uint16_t boardTemp[2] = {0};
-    bool boardDcFault[2] = {false, false};
-    bool boardTempFault[2] = {false, false};
-    bool dataValid;
+//! @brief This function checks the cell connections of each cell in the BMS data array.
+//!		Currently not used, as we have not been able to get it working, but the whole idea is that 
+//!			this function compares previously measured values to open wire check values, and if 
+//!				there is a significant drop in voltage, cell is allegedly disconnected. 
+//! @param cfg is the BMS configuration struct with constants 
+//! @param bmsData is an array of 144 cellData structs, containing index, fault, voltage and temperature
+//! @returns true is the cell is connnected properly, and false if the cell is "disconnected"
+bool checkAllCellConnections(BMSConfigStructTypedef cfg, CellData bmsData[]) {
+	uint16_t ADOWvoltage[cfg.numOfCellInputs];
+	uint16_t cellVoltage;
+	bool PEC_check[12];
+	bool dataValid = true;
 
-    // Wake the chain and refresh this board's config before the AUX conversion.
-    wakeup_idle();
-    writeConfigAddress(cfg, cfg->address[board_num]);
+	wakeup_idle();
 
-    // Clear stale data, then start a fresh thermistor conversion.
-    sendBroadcastCommand(ClearRegisters);
-    sendBroadcastCommand(StartCellTempVoltageADCConversionAll);
+	// at least 2
+	// por que los dos
+	sendBroadcastCommand(ClearRegisters);
+	sendBroadcastCommand(StartOpenWireConversionPulldown);
+	sendBroadcastCommand(StartOpenWireConversionPulldown);
+	sendBroadcastCommand(StartOpenWireConversionPulldown);
+	sendBroadcastCommand(StartOpenWireConversionPulldown);
+	sendBroadcastCommand(StartOpenWireConversionPulldown);
+	HAL_Delay(20);
 
-    // Wait for the conversion to finish, then wake the chain for readback.
-    HAL_Delay(3);
-    wakeup_idle();
-    HAL_Delay(1);
+	wakeup_idle();
 
-    // Read this board's thermistor channels and collect any associated fault flags.
-    dataValid = readCellTemp(cfg->address[board_num], boardTemp, boardDcFault, boardTempFault);
+	for (uint8_t board = 0; board < cfg.numOfICs; board++) {
+		PEC_check[board] = readCellVoltage(cfg.address[board], ADOWvoltage);
+		dataValid &= PEC_check[board];
 
-    for (uint8_t cell = 0; cell < LTC6811_USED_CELLS; cell++) {
-        // Convert the board-local cell index into the flattened pack index.
-        uint8_t globalCell = (uint8_t)(board_num * LTC6811_USED_CELLS + cell);
-        // Cells 1-3 use thermistor 0 and cells 4-6 use thermistor 1.
-        uint8_t therm_idx = (cell < 3U) ? 0U : 1U;
+		// I'm not touching this but wtf
+		ADOWvoltage[4] = ADOWvoltage[6];
+		ADOWvoltage[5] = ADOWvoltage[7];
+		ADOWvoltage[6] = ADOWvoltage[8];
+		ADOWvoltage[7] = ADOWvoltage[9];
 
-        // Copy the shared thermistor temperature into this cell entry.
-        bmsData[globalCell].temperature = boardTemp[therm_idx];
+		for (uint8_t cell = 0; cell < cfg.numOfCellsPerIC; cell++) {
+			cellVoltage = bmsData[(board * cfg.numOfCellsPerIC) + cell].voltage;
 
-        if (dataValid) {
-            // Clear the PEC fault bit when the AUX frame validates correctly.
-            bmsData[globalCell].fault &= (uint8_t)(~CELL_PEC_FAIL_MASK);
-        } else {
-            // Set the PEC fault bit when the AUX frame fails its PEC check.
-            bmsData[globalCell].fault |= CELL_PEC_FAIL_MASK;
-        }
+			if (!((cellVoltage - ADOWvoltage[cell]) < 1000)) {
+                bmsData[(board * cfg.numOfCellsPerIC) + cell].fault |= CELL_DISCONNECT_MASK;
+			} else {
+                bmsData[(board * cfg.numOfCellsPerIC) + cell].fault &= (uint8_t)(~CELL_DISCONNECT_MASK);
+            }
+		}
+	}
 
-        if (boardTempFault[therm_idx]) {
-            // Mark the cell when its shared thermistor temperature is out of valid range.
-            bmsData[globalCell].fault |= CELL_TEMP_FAIL_MASK;
-        } else {
-            // Clear the temperature fault once the shared sensor returns to normal.
-            bmsData[globalCell].fault &= (uint8_t)(~CELL_TEMP_FAIL_MASK);
-        }
-
-        if (boardDcFault[therm_idx]) {
-            // Mark the cell when its shared thermistor reading indicates a disconnect-style issue.
-            bmsData[globalCell].fault |= CELL_DCFAULT_MASK;
-        } else {
-            // Clear that fault once the thermistor input looks valid again.
-            bmsData[globalCell].fault &= (uint8_t)(~CELL_DCFAULT_MASK);
-        }
-    }
-
-    return dataValid;
+	return dataValid;
 }
+
+//! @brief This function writes the configuration struct of cells that are currently being discharged. This is to track which cells are //		being discharged while running our balancing algorithm. 
+//! @param cfg is the configuration struct that stores all the constants in our BMS algorithm 
+//! @param cellDischarge is a 2D array of cells that tracks which cells are being discharged or not : 1 = discharging, 0 = not discharging 
+//! returns 0 always -> not sure why we need a return value on this 
+bool dischargeCellGroups(BMSConfigStructTypedef *cfg, bool cellDischarge[12][12]) {
+	wakeup_idle();
+
+	for (uint8_t i = 0; i < cfg->numOfICs; i++) {
+		for (uint8_t j = 0; j < 12; j++) {
+			cfg->DischargeCell[j] = cellDischarge[i][j];
+		}
+
+		writeConfigAddress(cfg, cfg->address[i]);
+	}
+
+	for (uint8_t i = 0; i < 12; i++)
+		cfg->DischargeCell[i] = 0;
+
+	return 0;
+}
+
+//! @brief This function is used to wakeup the LTC chip that we want to use to get readings from 
+void inline wakeup_idle() {
+	uint32_t delay = 1;
+	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
+	while (delay--)
+		;
+	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
+}
+
+bool poll_single_secondary_voltage_reading(uint8_t board_num, BMSConfigStructTypedef *cfg, CellData bmsData[]){
+	uint16_t boardVoltage[12];
+	bool PEC_check[12]	;
+	bool dataValid = true;
+
+	wakeup_idle();
+	writeConfigAddress(cfg, cfg->address[board_num]);
+
+	sendBroadcastCommand(ClearRegisters);
+	sendBroadcastCommand(StartCellVoltageADCConversionAll);
+
+	HAL_Delay(3);
+	wakeup_idle();
+	HAL_Delay(1);
+
+	// read voltage of every cell input (1-12) for a specific address, store in boardVoltage
+	PEC_check[board_num] = readCellVoltage(board_num, boardVoltage);
+
+	dataValid &= PEC_check[board_num];
+
+	// store cell number and valid data bit in bmsData
+	for (uint8_t cell = 0; cell < NUM_BOARDS; cell++) {
+		bmsData[(board_num * NUM_BOARDS) + cell].voltage = (uint8_t)((board_num * NUM_BOARDS) + cell + 1);  // cell number
+
+		if (!PEC_check[board_num]) {
+			bmsData[(board_num * NUM_BOARDS) + cell].fault |= CELL_PEC_FAIL_MASK;
+		} else {
+			bmsData[(board_num * NUM_BOARDS) + cell].fault &= (uint8_t)(~CELL_PEC_FAIL_MASK);
+		}
+
+		bmsData[(board_num * NUM_BOARDS) + cell].voltage = boardVoltage[cell];
+	}
+
+	return dataValid;
+
+}
+
+bool poll_single_secondary_temp_reading(uint8_t board_num, BMSConfigStructTypedef *cfg, CellData bmsData[]){
+
+	// do writeConfigAll(&BMSConfig);
+	uint16_t boardTemp[4];
+	bool boardDCFault[4];
+	bool boardTempFault[4];
+	bool PEC_check[12];
+	bool dataValid = true;
+	//Do write config all
+	wakeup_idle();
+
+	writeConfigAddress(cfg, cfg->address[board_num]);
+
+	sendBroadcastCommand(ClearRegisters);
+	sendBroadcastCommand(StartCellTempVoltageADCConversionAll);
+
+	HAL_Delay(3);
+
+
+	wakeup_idle();
+	HAL_Delay(1);
+
+	// read temperature, check for OT and temp DC
+	PEC_check[board_num] = readCellTemp(board_num, boardTemp, boardDCFault, boardTempFault);
+
+	dataValid &= PEC_check[board_num];
+
+	// store OT and temp DC bits in status byte
+	for (uint8_t cell = 0; cell < 12; cell++) {
+		if (!PEC_check[board_num]) {
+			bmsData[(board_num * 12) + cell].fault |= CELL_PEC_FAIL_MASK;
+		} else {
+			bmsData[(board_num * 12) + cell].fault &= (uint8_t)(~CELL_PEC_FAIL_MASK);
+		}
+
+		if (boardTempFault[cell / 3]) {
+			bmsData[(board_num * 12) + cell].fault |= CELL_TEMP_FAIL_MASK;
+		} else {
+			bmsData[(board_num * 12) + cell].fault &= (uint8_t)(~CELL_TEMP_FAIL_MASK);	// set OT bit
+		}
+
+		if (boardDCFault[cell / 3]) {
+			bmsData[(board_num * 12) + cell].fault |= CELL_DCFAULT_MASK;
+		} else {
+			bmsData[(board_num * 12) + cell].fault &= (uint8_t)(~CELL_DCFAULT_MASK);
+		}
+
+		bmsData[(board_num * 12) + cell].temperature = boardTemp[cell / 3];
+	}
+
+	return dataValid;
+
+}
+
+//! @brief Reads register specified by command from specified board address 
+//! @param command is the command that we will send to the board
+//! @param address is the specific board that will get the command
+//! @param data is where the data read from the specific board will be StartOpenWireConversionPulldown
+//! @returns true if the data is valid, otherwise false (i.e., received PEC matches expected PEC value)
+bool readRegister(CommandCodeTypedef command, uint8_t address, uint16_t *data) {  // changed to take array by reference now that malloc is removed
+	uint8_t cmd[12];
+	uint8_t rx_data[12];
+	uint16_t PEC_return;
+	uint8_t PEC_send[6];
+	bool dataValid = true;
+
+	PEC_send[0] = (uint8_t)(0x80 | ((address << 3) & 0x78) | ((command >> 8) & 0x07));
+	PEC_send[1] = (uint8_t)(command & 0xFF);
+
+	cmd[0] = PEC_send[0];
+	cmd[1] = PEC_send[1];
+
+	PEC_return = calculatePEC(2, PEC_send);
+
+	cmd[2] = (uint8_t)((PEC_return >> 8) & 0xFF);
+	cmd[3] = (uint8_t)(PEC_return & 0xFF);
+
+	cmd[4] = 0;
+	cmd[5] = 0;
+	cmd[6] = 0;
+	cmd[7] = 0;
+	cmd[8] = 0;
+	cmd[9] = 0;
+	cmd[10] = 0;
+	cmd[11] = 0;
+
+	SPIWriteRead(cmd, rx_data, sizeof(cmd));  // send 4 command bytes, receive 6 cell voltage bytes (4-9) and 2 PEC bytes (10-11)
+
+	// calculate PEC based on cell voltage data received
+	PEC_send[0] = rx_data[4];  // cell 1 voltage low bytes
+	PEC_send[1] = rx_data[5];  // cell 1 voltage high bytes
+	PEC_send[2] = rx_data[6];  // cell 2 voltage low bytes
+	PEC_send[3] = rx_data[7];  // cell 2 voltage high bytes
+	PEC_send[4] = rx_data[8];  // cell 3 voltage low bytes
+	PEC_send[5] = rx_data[9];  // cell 3 voltage high bytes
+
+	PEC_return = calculatePEC(6, PEC_send);
+
+	// check if received PEC matches calculated PEC
+	if (PEC_return != (((rx_data[10] << 8) & 0xFF00) | (rx_data[11] & 0x00FF))) {
+		dataValid = false;
+	}
+
+	if (command == ReadCellVoltageRegisterGroup1to3) {
+		data[0] = (uint16_t)((rx_data[5] << 8) & 0xFF00) | (rx_data[4] & 0x00FF);
+		data[1] = (uint16_t)((rx_data[7] << 8) & 0xFF00) | (rx_data[6] & 0x00FF);
+		data[2] = (uint16_t)((rx_data[9] << 8) & 0xFF00) | (rx_data[8] & 0x00FF);
+		// data[3] = (uint16_t) ((rx_data[10] << 8) & 0xFF00) | (rx_data[11] & 0x00FF);
+		// data[4] = PEC_return;
+	}
+
+	if (command == ReadCellVoltageRegisterGroup4to6) {
+		data[3] = (uint16_t)((rx_data[5] << 8) & 0xFF00) | (rx_data[4] & 0x00FF);
+		data[4] = (uint16_t)((rx_data[7] << 8) & 0xFF00) | (rx_data[6] & 0x00FF);
+		data[5] = (uint16_t)((rx_data[9] << 8) & 0xFF00) | (rx_data[8] & 0x00FF);
+	}
+
+	if (command == ReadCellVoltageRegisterGroup7to9) {
+		data[6] = (uint16_t)((rx_data[5] << 8) & 0xFF00) | (rx_data[4] & 0x00FF);
+		data[7] = (uint16_t)((rx_data[7] << 8) & 0xFF00) | (rx_data[6] & 0x00FF);
+		data[8] = (uint16_t)((rx_data[9] << 8) & 0xFF00) | (rx_data[8] & 0x00FF);
+	}
+
+	if (command == ReadCellVoltageRegisterGroup10to12) {
+		data[9] = (uint16_t)((rx_data[5] << 8) & 0xFF00) | (rx_data[4] & 0x00FF);
+		data[10] = (uint16_t)((rx_data[7] << 8) & 0xFF00) | (rx_data[6] & 0x00FF);
+		data[11] = (uint16_t)((rx_data[9] << 8) & 0xFF00) | (rx_data[8] & 0x00FF);
+	}
+
+	if (command == ReadAuxiliaryGroupA) {
+		data[0] = (uint16_t)((rx_data[5] << 8) & 0xFF00) | (rx_data[4] & 0x00FF);
+		data[1] = (uint16_t)((rx_data[7] << 8) & 0xFF00) | (rx_data[6] & 0x00FF);
+		data[2] = (uint16_t)((rx_data[9] << 8) & 0xFF00) | (rx_data[8] & 0x00FF);
+	}
+
+	if (command == ReadAuxiliaryGroupB) {
+		data[3] = (uint16_t)((rx_data[5] << 8) & 0xFF00) | (rx_data[4] & 0x00FF);
+	}
+
+	if (command == ReadConfigurationRegisterGroup) {
+		data[0] = (uint16_t)((rx_data[4] << 8) & 0xFF00) | (rx_data[5] & 0x00FF);
+		data[1] = (uint16_t)((rx_data[6] << 8) & 0xFF00) | (rx_data[7] & 0x00FF);
+		data[2] = (uint16_t)((rx_data[8] << 8) & 0xFF00) | (rx_data[9] & 0x00FF);
+		data[3] = (uint16_t)((rx_data[10] << 8) & 0xFF00) | (rx_data[11] & 0x00FF);
+	}
+
+	return (dataValid);
+}
+
+//! @brief Sends specified write only command to every LTC in the chain (ex: ADCV)
+//! @param command contains every command code used 
+//! @returns none 
+void sendBroadcastCommand(CommandCodeTypedef command) {
+	uint8_t cmd[4];
+	uint16_t PEC_return;
+
+	cmd[0] = (uint8_t)((command >> 8) & 0x0F);
+	cmd[1] = (uint8_t)(command & 0xFF);
+
+	PEC_return = calculatePEC(2, (uint8_t *)&(cmd));
+
+	cmd[2] = (uint8_t)((PEC_return >> 8) & 0xFF);
+	cmd[3] = (uint8_t)(PEC_return & 0xFF);
+
+	SPIWrite(cmd, 4);
+}
+
+//! @brief Sends specified write-only command to LTC with the specified address 
+//! @param command is the command that will be sent to the LTC 
+//! @param address is the specified address of the LTC that will receive the command
+//! @returns none 
+void sendAddressCommand(CommandCodeTypedef command, uint8_t address) {
+	uint8_t cmd[4];
+	uint16_t PEC_return;
+	uint8_t msbytes[2];
+
+	msbytes[0] = (uint8_t)(0x80 | ((address << 3) & 0x78) | ((command >> 8) & 0x07));
+	msbytes[1] = (uint8_t)(command & 0xFF);
+
+	cmd[0] = msbytes[0];
+	cmd[1] = msbytes[1];
+
+	PEC_return = calculatePEC(2, msbytes);
+
+	cmd[2] = (uint8_t)((PEC_return >> 8) & 0xFF);
+	cmd[3] = (uint8_t)(PEC_return & 0xFF);
+
+	SPIWrite(cmd, 4);
+}
+
+

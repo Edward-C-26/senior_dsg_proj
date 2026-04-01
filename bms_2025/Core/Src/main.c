@@ -693,6 +693,7 @@ typedef struct
   int16_t cell_temp_cC[NUM_USED_CELLS];
 
   uint16_t pack_voltage_mV;
+  uint16_t pack_current_deciA;  /* Pack current in units of 0.1A (10A stored as 100) */
   uint8_t status_bytes[6];
 
   uint16_t crc;
@@ -763,6 +764,7 @@ static void uart_send_bms_telemetry(void)
   }
 
   packet.pack_voltage_mV = BMSCriticalInfo.cellMonitorPackVoltage;
+  packet.pack_current_deciA = (int16_t)(BMSCriticalInfo.packCurrent * 10.0f);
 
   for (uint8_t i = 0U; i < 6U; i++) {
     packet.status_bytes[i] = BMS_STATUS[i];

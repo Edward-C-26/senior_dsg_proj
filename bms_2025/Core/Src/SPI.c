@@ -1,5 +1,4 @@
 
-
 #include "SPI.h"
 uint32_t write_block_start_time = 0, write_block_total_time = 0, rw_block_start_time = 0, rw_block_total_time = 0;
 // MAX DELAY MAX_SPI_DELAY
