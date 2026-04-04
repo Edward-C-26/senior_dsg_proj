@@ -1,9 +1,9 @@
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
-  * @file    spi.h
+  * @file    tim.h
   * @brief   This file contains all the function prototypes for
-  *          the spi.c file
+  *          the tim.c file
   ******************************************************************************
   * @attention
   *
@@ -18,8 +18,8 @@
   */
 /* USER CODE END Header */
 /* Define to prevent recursive inclusion -------------------------------------*/
-#ifndef __SPI_H__
-#define __SPI_H__
+#ifndef __TIM_H__
+#define __TIM_H__
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,16 +32,27 @@ extern "C" {
 
 /* USER CODE END Includes */
 
-extern SPI_HandleTypeDef hspi1;
+extern TIM_HandleTypeDef htim1;
 
-extern SPI_HandleTypeDef hspi2;
+extern TIM_HandleTypeDef htim2;
+
+extern TIM_HandleTypeDef htim3;
+
+extern TIM_HandleTypeDef htim7;
+
+extern TIM_HandleTypeDef htim13;
 
 /* USER CODE BEGIN Private defines */
 
 /* USER CODE END Private defines */
 
-void MX_SPI1_Init(void);
-void MX_SPI2_Init(void);
+void MX_TIM1_Init(void);
+void MX_TIM2_Init(void);
+void MX_TIM3_Init(void);
+void MX_TIM7_Init(void);
+void MX_TIM13_Init(void);
+
+void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 
 /* USER CODE BEGIN Prototypes */
 
@@ -51,5 +62,5 @@ void MX_SPI2_Init(void);
 }
 #endif
 
-#endif /* __SPI_H__ */
+#endif /* __TIM_H__ */
 

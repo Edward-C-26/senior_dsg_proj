@@ -1,7 +1,7 @@
 #ifndef BMS_CONFIG_H
 #define BMS_CONFIG_H
 
-#include "main.h"
+#include <stdint.h>
 #include "stdbool.h"
 #include "stdlib.h"
 #include "string.h"

@@ -1,6 +1,8 @@
 #ifndef FAULT_H
 #define FAULT_H
 
+#include <stdint.h>
+
 // Need to account for this is main or when we get 2949 data so we don't have to worry here
 #define INVALID_VOLTAGE_UPPER_THRESHOLD   45000
 #define INVALID_VOLTAGE_LOWER_THRESHOLD   25000

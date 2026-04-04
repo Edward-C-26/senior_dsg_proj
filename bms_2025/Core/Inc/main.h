@@ -52,8 +52,6 @@ extern "C" {
 
 /* USER CODE END EM */
 
-void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
-
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
 
@@ -61,12 +59,11 @@ void Error_Handler(void);
 extern SPI_HandleTypeDef* ltc_spi;
 extern int16_t poll_cell_temps;
 extern int16_t poll_cell_voltages;
-extern TIM_HandleTypeDef htim1;
-extern TIM_HandleTypeDef htim7;
-extern TIM_HandleTypeDef htim13;
+// extern TIM_HandleTypeDef htim1; defined in time.h
+// extern TIM_HandleTypeDef htim7;
+// extern TIM_HandleTypeDef htim13;
 extern int32_t fault_timer;
 
-void send_cell_vals_polling();
 
 /* USER CODE END EFP */
 
@@ -97,14 +94,6 @@ void send_cell_vals_polling();
 #define SPI_UCOMM_MOSI_GPIO_Port GPIOA
 #define LV_PWR_MONITOR_Pin GPIO_PIN_4
 #define LV_PWR_MONITOR_GPIO_Port GPIOC
-#define SPI_ADC_CS_Pin GPIO_PIN_12
-#define SPI_ADC_CS_GPIO_Port GPIOB
-#define SPI_ADC_SCK_Pin GPIO_PIN_13
-#define SPI_ADC_SCK_GPIO_Port GPIOB
-#define SPI_ADC_MISO_Pin GPIO_PIN_14
-#define SPI_ADC_MISO_GPIO_Port GPIOB
-#define SPI_ADC_MOSI_Pin GPIO_PIN_15
-#define SPI_ADC_MOSI_GPIO_Port GPIOB
 #define ADC_CLKIN_Pin GPIO_PIN_6
 #define ADC_CLKIN_GPIO_Port GPIOC
 #define ADC_DRDY_Pin GPIO_PIN_7
@@ -117,14 +106,6 @@ void send_cell_vals_polling();
 #define SWDIO_TC_GPIO_Port GPIOA
 #define SWCLK_TC_Pin GPIO_PIN_14
 #define SWCLK_TC_GPIO_Port GPIOA
-#define SPI_FERAM_CS_Pin GPIO_PIN_15
-#define SPI_FERAM_CS_GPIO_Port GPIOA
-#define SPI_FERAM_SCK_Pin GPIO_PIN_10
-#define SPI_FERAM_SCK_GPIO_Port GPIOC
-#define SPI_FERAM_MISO_Pin GPIO_PIN_11
-#define SPI_FERAM_MISO_GPIO_Port GPIOC
-#define SPI_FERAM_MOSI_Pin GPIO_PIN_12
-#define SPI_FERAM_MOSI_GPIO_Port GPIOC
 #define IMD_DIAGNOSTIC_Pin GPIO_PIN_3
 #define IMD_DIAGNOSTIC_GPIO_Port GPIOB
 
