@@ -44,12 +44,6 @@ extern "C" {
 #define DISABLE_ALL_IRQS     do { } while (0)
 #define ENABLE_ALL_IRQS      do { } while (0)
 
-#define DISABLE_CAN_TX_TIMER_IRQ   do { } while (0)
-#define ENABLE_CAN_TX_TIMER_IRQ    do { } while (0)
-#define DISABLE_CAN1_RX_FIF0_IRQ   do { } while (0)
-#define ENABLE_CAN1_RX_FIF0_IRQ    do { } while (0)
-#define DISABLE_ALL_CAN_IRQS       do { } while (0)
-#define ENABLE_ALL_CAN_IRQS        do { } while (0)
 
 /* USER CODE END EC */
 
@@ -72,7 +66,6 @@ extern TIM_HandleTypeDef htim7;
 extern TIM_HandleTypeDef htim13;
 extern int32_t fault_timer;
 
-void send_can_msg_from_irq();
 void send_cell_vals_polling();
 
 /* USER CODE END EFP */

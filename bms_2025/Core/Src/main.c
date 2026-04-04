@@ -6,7 +6,6 @@
   ******************************************************************************
   */
 /* USER CODE END Header */
-
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 
@@ -66,16 +65,11 @@ SPI_HandleTypeDef hspi1;
 SPI_HandleTypeDef hspi2;
 SPI_HandleTypeDef hspi3;
 
-SPI_HandleTypeDef* ltc_spi = &hspi1;
-
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim7;
 TIM_HandleTypeDef htim13;
-
-UART_HandleTypeDef huart2;
-static uint32_t last_uart_tx_ms = 0U;
 
 /* USER CODE BEGIN PV */
 CellData bmsData[NUM_CELLS];
@@ -98,12 +92,11 @@ static void MX_GPIO_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_SPI2_Init(void);
 static void MX_SPI3_Init(void);
-static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
+static void MX_TIM1_Init(void);
 static void MX_TIM7_Init(void);
 static void MX_TIM13_Init(void);
-
 /* USER CODE BEGIN PFP */
 static void clear_all_discharge_requests(bool discharge_matrix[NUM_BOARDS][12]);
 static void stop_all_balancing(BMSConfigStructTypedef *cfg, bool discharge_matrix[NUM_BOARDS][12]);
@@ -274,29 +267,43 @@ static void MX_USART2_UART_Init(void)
 
 /* USER CODE END 0 */
 
-/*
- * Bring up the MCU, initialize the peripherals this firmware uses, load the
- * BMS configuration, and then stay in the background polling loop.
- *
- * The loop is intentionally straightforward: sample voltages, sample
- * temperatures, refresh faults, and let the balancing logic make decisions
- * based on the newest data.
- */
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
 int main(void)
 {
+
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
   SystemClock_Config();
 
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_SPI1_Init();
   MX_SPI2_Init();
   MX_SPI3_Init();
-  MX_TIM1_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
+  MX_TIM1_Init();
   MX_TIM7_Init();
   MX_TIM13_Init();
-
   /* USER CODE BEGIN 2 */
   initPECTable();
   loadConfig(&BMSConfig);
@@ -316,51 +323,34 @@ int main(void)
   last_uart_tx_ms = HAL_GetTick();
   /* USER CODE END 2 */
 
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
   while (1)
   {
-    const uint32_t now = HAL_GetTick();
+    /* USER CODE END WHILE */
 
-    if ((now - last_voltage_poll_ms) >= VOLTAGE_POLL_PERIOD_MS) {
-      last_voltage_poll_ms = now;
-      poll_cell_voltages_once();
-      refresh_fault_state();
-    }
-
-    if ((now - last_temp_poll_ms) >= TEMP_POLL_PERIOD_MS) {
-      last_temp_poll_ms = now;
-      poll_cell_temps_once();
-      refresh_fault_state();
-    }
-
-    handle_balancing();
-
-    if ((now - last_heartbeat_ms) >= HEARTBEAT_PERIOD_MS) {
-      last_heartbeat_ms = now;
-      heartbeat_task();
-    }
-
-    if ((now - last_uart_tx_ms) >= UART_TX_PERIOD_MS) {
-      last_uart_tx_ms = now;
-      uart_send_bms_telemetry();
-    }
+    /* USER CODE BEGIN 3 */
   }
+  /* USER CODE END 3 */
 }
 
-/*
- * Set up a simple clock tree using the internal high-speed oscillator.
- *
- * This keeps the system clock configuration easy to reason about during bring
- * up and avoids introducing PLL-related complexity in the main application
- * file.
- */
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
+  /** Configure the main internal regulator output voltage
+  */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
 
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
@@ -370,7 +360,10 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
@@ -382,14 +375,22 @@ void SystemClock_Config(void)
   }
 }
 
-/*
- * Initialize SPI1 as a master peripheral.
- *
- * These settings define the clock mode and transfer format expected by the
- * device connected to this bus.
- */
+/**
+  * @brief SPI1 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_SPI1_Init(void)
 {
+
+  /* USER CODE BEGIN SPI1_Init 0 */
+
+  /* USER CODE END SPI1_Init 0 */
+
+  /* USER CODE BEGIN SPI1_Init 1 */
+
+  /* USER CODE END SPI1_Init 1 */
+  /* SPI1 parameter configuration*/
   hspi1.Instance = SPI1;
   hspi1.Init.Mode = SPI_MODE_MASTER;
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
@@ -406,16 +407,28 @@ static void MX_SPI1_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN SPI1_Init 2 */
+
+  /* USER CODE END SPI1_Init 2 */
+
 }
 
-/*
- * Initialize SPI2 with the timing required by the device on that interface.
- *
- * The phase and prescaler differ from SPI1 because this bus is serving a
- * different peripheral.
- */
+/**
+  * @brief SPI2 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_SPI2_Init(void)
 {
+
+  /* USER CODE BEGIN SPI2_Init 0 */
+
+  /* USER CODE END SPI2_Init 0 */
+
+  /* USER CODE BEGIN SPI2_Init 1 */
+
+  /* USER CODE END SPI2_Init 1 */
+  /* SPI2 parameter configuration*/
   hspi2.Instance = SPI2;
   hspi2.Init.Mode = SPI_MODE_MASTER;
   hspi2.Init.Direction = SPI_DIRECTION_2LINES;
@@ -432,13 +445,28 @@ static void MX_SPI2_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN SPI2_Init 2 */
+
+  /* USER CODE END SPI2_Init 2 */
+
 }
 
-/*
- * Initialize SPI3 as another master bus for board peripherals.
- */
+/**
+  * @brief SPI3 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_SPI3_Init(void)
 {
+
+  /* USER CODE BEGIN SPI3_Init 0 */
+
+  /* USER CODE END SPI3_Init 0 */
+
+  /* USER CODE BEGIN SPI3_Init 1 */
+
+  /* USER CODE END SPI3_Init 1 */
+  /* SPI3 parameter configuration*/
   hspi3.Instance = SPI3;
   hspi3.Init.Mode = SPI_MODE_MASTER;
   hspi3.Init.Direction = SPI_DIRECTION_2LINES;
@@ -455,19 +483,30 @@ static void MX_SPI3_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN SPI3_Init 2 */
+
+  /* USER CODE END SPI3_Init 2 */
+
 }
 
-/*
- * Configure TIM1 as a base timer with an internal clock source.
- *
- * No special trigger routing is used here; the timer is simply prepared for
- * later scheduling or timing work elsewhere in the firmware.
- */
+/**
+  * @brief TIM1 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_TIM1_Init(void)
 {
+
+  /* USER CODE BEGIN TIM1_Init 0 */
+
+  /* USER CODE END TIM1_Init 0 */
+
   TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
 
+  /* USER CODE BEGIN TIM1_Init 1 */
+
+  /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 1;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
@@ -490,23 +529,34 @@ static void MX_TIM1_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN TIM1_Init 2 */
+
+  /* USER CODE END TIM1_Init 2 */
+
 }
 
-/*
- * Configure TIM2 for input-capture operation on channel 2.
- *
- * This lets the firmware timestamp incoming edges if another subsystem needs a
- * measured external signal.
- */
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_TIM2_Init(void)
 {
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_IC_InitTypeDef sConfigIC = {0};
 
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
   htim2.Init.Prescaler = 0;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 4294967295U;
+  htim2.Init.Period = 4294967295;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_IC_Init(&htim2) != HAL_OK)
@@ -527,20 +577,31 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+
 }
 
-/*
- * Configure TIM3 for PWM generation on channel 1.
- *
- * The post-init call finishes the pin-side setup after the timer itself is
- * configured.
- */
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_TIM3_Init(void)
 {
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
   TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
 
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
   htim3.Init.Prescaler = 0;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
@@ -574,16 +635,30 @@ static void MX_TIM3_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
   HAL_TIM_MspPostInit(&htim3);
+
 }
 
-/*
- * Configure TIM7 as a simple periodic base timer.
- */
+/**
+  * @brief TIM7 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_TIM7_Init(void)
 {
+
+  /* USER CODE BEGIN TIM7_Init 0 */
+
+  /* USER CODE END TIM7_Init 0 */
+
   TIM_MasterConfigTypeDef sMasterConfig = {0};
 
+  /* USER CODE BEGIN TIM7_Init 1 */
+
+  /* USER CODE END TIM7_Init 1 */
   htim7.Instance = TIM7;
   htim7.Init.Prescaler = 0;
   htim7.Init.CounterMode = TIM_COUNTERMODE_UP;
@@ -599,13 +674,27 @@ static void MX_TIM7_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN TIM7_Init 2 */
+
+  /* USER CODE END TIM7_Init 2 */
+
 }
 
-/*
- * Configure TIM13 as an additional free-running time base.
- */
+/**
+  * @brief TIM13 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_TIM13_Init(void)
 {
+
+  /* USER CODE BEGIN TIM13_Init 0 */
+
+  /* USER CODE END TIM13_Init 0 */
+
+  /* USER CODE BEGIN TIM13_Init 1 */
+
+  /* USER CODE END TIM13_Init 1 */
   htim13.Instance = TIM13;
   htim13.Init.Prescaler = 495;
   htim13.Init.CounterMode = TIM_COUNTERMODE_UP;
@@ -616,191 +705,126 @@ static void MX_TIM13_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN TIM13_Init 2 */
+
+  /* USER CODE END TIM13_Init 2 */
+
 }
 
-/*
- * Initialize the GPIO used directly by this firmware.
- *
- * Output levels are written before the pins are switched into output mode so
- * attached hardware does not see a brief unintended pulse during startup.
- */
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
+/* USER CODE BEGIN MX_GPIO_Init_1 */
+/* USER CODE END MX_GPIO_Init_1 */
 
+  /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(BMS_FLT_EN_GPIO_Port, BMS_FLT_EN_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(DEBUG_LED_GPIO_Port, DEBUG_LED_Pin, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(SPI_UCOMM_CS_GPIO_Port, SPI_UCOMM_CS_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(SPI_FERAM_CS_GPIO_Port, SPI_FERAM_CS_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, SPI_UCOMM_CS_Pin|SPI_FERAM_CS_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(SPI_ADC_CS_GPIO_Port, SPI_ADC_CS_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(ADC_RST_GPIO_Port, ADC_RST_Pin, GPIO_PIN_SET);
 
-  GPIO_InitStruct.Pin = BMS_FLT_EN_Pin | ADC_RST_Pin;
+  /*Configure GPIO pins : BMS_FLT_EN_Pin ADC_RST_Pin */
+  GPIO_InitStruct.Pin = BMS_FLT_EN_Pin|ADC_RST_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = SHUTDOWN_ACTIVE_Pin | LV_PWR_MONITOR_Pin | ADC_DRDY_Pin;
+  /*Configure GPIO pins : SHUTDOWN_ACTIVE_Pin LV_PWR_MONITOR_Pin ADC_DRDY_Pin */
+  GPIO_InitStruct.Pin = SHUTDOWN_ACTIVE_Pin|LV_PWR_MONITOR_Pin|ADC_DRDY_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : PRECHARGE_COMPLETE_Pin */
   GPIO_InitStruct.Pin = PRECHARGE_COMPLETE_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(PRECHARGE_COMPLETE_GPIO_Port, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : DEBUG_LED_Pin */
   GPIO_InitStruct.Pin = DEBUG_LED_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
   HAL_GPIO_Init(DEBUG_LED_GPIO_Port, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = SPI_UCOMM_CS_Pin | SPI_FERAM_CS_Pin;
+  /*Configure GPIO pins : SPI_UCOMM_CS_Pin SPI_FERAM_CS_Pin */
+  GPIO_InitStruct.Pin = SPI_UCOMM_CS_Pin|SPI_FERAM_CS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : SPI_ADC_CS_Pin */
   GPIO_InitStruct.Pin = SPI_ADC_CS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(SPI_ADC_CS_GPIO_Port, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : CHARGE_EN_Pin */
   GPIO_InitStruct.Pin = CHARGE_EN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(CHARGE_EN_GPIO_Port, &GPIO_InitStruct);
+
+/* USER CODE BEGIN MX_GPIO_Init_2 */
+/* USER CODE END MX_GPIO_Init_2 */
 }
 
+/* USER CODE BEGIN 4 */
 
-#pragma pack(push, 1)
-typedef struct
-{
-  uint8_t sof1;
-  uint8_t sof2;
-  uint8_t payload_len;
-  uint32_t timestamp_ms;
+/* USER CODE END 4 */
 
-  uint16_t cell_voltage_mV[NUM_USED_CELLS];
-  int16_t cell_temp_cC[NUM_USED_CELLS];
-
-  uint16_t pack_voltage_mV;
-  uint16_t pack_current_deciA;  /* Pack current in units of 0.1A (10A stored as 100) */
-  uint8_t status_bytes[6];
-
-  uint16_t crc;
-} BmsUartPacket_t;
-#pragma pack(pop)
-
-static uint16_t crc16_ccitt(const uint8_t *data, uint16_t length)
-{
-  uint16_t crc = 0xFFFFU;
-
-  for (uint16_t i = 0U; i < length; i++) {
-      crc ^= (uint16_t)((uint16_t)data[i] << 8);
-
-      for (uint8_t bit = 0U; bit < 8U; bit++) {
-          if ((crc & 0x8000U) != 0U) {
-              crc = (uint16_t)((crc << 1) ^ 0x1021U);
-          } else {
-              crc <<= 1;
-          }
-      }
-  }
-
-  return crc;
-}
-
-static void build_display_temperatures_cC(int16_t temp_display_cC[NUM_USED_CELLS])
-{
-  int16_t t1_cC = 0;
-  int16_t t2_cC = 0;
-
-  /* Use representative cell from each thermistor group */
-  t1_cC = (int16_t)(bmsData[0].temperature / 10U);
-  t2_cC = (int16_t)(bmsData[3].temperature / 10U);
-
-  temp_display_cC[0] = t1_cC;
-  temp_display_cC[1] = t1_cC;
-  temp_display_cC[2] = t1_cC;
-  temp_display_cC[3] = t2_cC;
-  temp_display_cC[4] = t2_cC;
-  temp_display_cC[5] = t2_cC;
-}
-
-static void uart_send_bms_telemetry(void)
-{
-  BmsUartPacket_t packet;
-  int16_t expandedTemps[NUM_USED_CELLS];
-  uint16_t crc_input_len;
-
-  memset(&packet, 0, sizeof(packet));
-
-  packet.sof1 = UART_BMS_PACKET_SOF1;
-  packet.sof2 = UART_BMS_PACKET_SOF2;
-  packet.payload_len = (uint8_t)(sizeof(BmsUartPacket_t) - 3U); /* excludes sof1, sof2, payload_len */
-  packet.timestamp_ms = HAL_GetTick();
-
-  for (uint8_t i = 0U; i < NUM_USED_CELLS; i++) {
-    /*
-      * Cell voltage code to mV
-      * 42000 -> 4200 mV
-      */
-    packet.cell_voltage_mV[i] = (uint16_t)(bmsData[i].voltage / 10U);
-}
-
-  build_display_temperatures_cC(expandedTemps);
-
-  for (uint8_t i = 0U; i < NUM_USED_CELLS; i++) {
-    packet.cell_temp_cC[i] = expandedTemps[i];
-  }
-
-  packet.pack_voltage_mV = BMSCriticalInfo.cellMonitorPackVoltage;
-  packet.pack_current_deciA = (int16_t)(BMSCriticalInfo.packCurrent * 10.0f);
-
-  for (uint8_t i = 0U; i < 6U; i++) {
-    packet.status_bytes[i] = BMS_STATUS[i];
-  }
-
-  crc_input_len = (uint16_t)(sizeof(BmsUartPacket_t) - sizeof(packet.crc));
-  packet.crc = crc16_ccitt((const uint8_t *)&packet, crc_input_len);
-
-  (void)HAL_UART_Transmit(&huart2, (uint8_t *)&packet, sizeof(packet), 50U);
-}
-
-
-/*
- * Stop normal execution after an unrecoverable error.
- *
- * Once we get here, interrupts are disabled and the firmware stays in a tight
- * loop so the failure is obvious during debugging.
- */
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
 void Error_Handler(void)
 {
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
+  /* USER CODE END Error_Handler_Debug */
 }
 
-#ifdef USE_FULL_ASSERT
-/*
- * HAL assertion hook.
- *
- * The file and line are currently unused, but the function is kept so full
- * assert builds still have a defined landing point.
- */
+#ifdef  USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-  (void)file;
-  (void)line;
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
 }
-#endif
+#endif /* USE_FULL_ASSERT */
