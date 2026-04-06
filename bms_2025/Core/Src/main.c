@@ -88,6 +88,13 @@ static uint32_t last_voltage_poll_ms = 0U;
 static uint32_t last_temp_poll_ms = 0U;
 static uint32_t last_heartbeat_ms = 0U;
 static uint32_t last_uart_tx_ms = 0U;
+
+/* Simulation variables for testing BMS viewer */
+static uint32_t simulation_tick = 0U;
+static const float VOLTAGE_BASE = 3.7f;    /* Base cell voltage in volts */
+static const float VOLTAGE_AMPLITUDE = 0.3f; /* Varies by +/-0.3V */
+static const float TEMP_BASE = 25.0f;      /* Base temperature in C */
+static const float TEMP_AMPLITUDE = 10.0f; /* Varies by +/-10C */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -98,6 +105,7 @@ static void stop_all_balancing(BMSConfigStructTypedef *cfg, bool discharge_matri
 static bool pack_is_safe_for_discharge(const uint8_t status[6]);
 static uint16_t get_cell_imbalance_counts(const BMS_critical_info_t *bms);
 static void poll_cell_voltages_once(void);
+static void simulate_bms_data(void);
 static void poll_cell_temps_once(void);
 static void refresh_fault_state(void);
 static void handle_balancing(void);
@@ -267,6 +275,52 @@ static uint16_t crc16_ccitt(const uint8_t *data, uint16_t length)
 //     temp_display_cC[i] = (int16_t)((bmsData[i].temperature * 75) / 100);
 //   }
 // }
+
+/**
+  * @brief Simulate varying BMS data for testing/verification
+  * Generates sine-wave varying cell voltages and temperatures
+  */
+static void simulate_bms_data(void)
+{
+  uint8_t i;
+  float sine_value;
+  static const float PI = 3.14159265359f;
+  
+  /* Generate sine wave that cycles every ~10 seconds */
+  float phase = (2.0f * PI * (float)(simulation_tick % 50)) / 50.0f;
+  
+  /* Simple sine approximation using symmetry */
+  if (phase < PI) {
+    sine_value = 2.0f * phase / PI - 1.0f;
+  } else {
+    sine_value = 3.0f - 2.0f * phase / PI;
+  }
+  
+  /* Clip to [-1, 1] */
+  if (sine_value > 1.0f) sine_value = 1.0f;
+  if (sine_value < -1.0f) sine_value = -1.0f;
+  
+  /* Simulate 6 cell voltages varying around base voltage */
+  for (i = 0U; i < NUM_USED_CELLS; i++) {
+    float cell_voltage = VOLTAGE_BASE + (VOLTAGE_AMPLITUDE * sine_value);
+    bmsData[i].voltage = (uint16_t)(cell_voltage * 10000.0f);  /* Store in 100uV units */
+  }
+  
+  /* Simulate cell temperatures varying */
+  for (i = 0U; i < NUM_USED_CELLS; i++) {
+    float cell_temp = TEMP_BASE + (TEMP_AMPLITUDE * sine_value);
+    bmsData[i].temperature = (int16_t)(cell_temp * 100.0f) / 100;  /* Store in C */
+  }
+  
+  /* Simulate pack voltage (sum of cells) */
+  BMSCriticalInfo.isoAdcPackVoltage = (VOLTAGE_BASE * 6.0f) + (VOLTAGE_AMPLITUDE * 6.0f * sine_value);
+  
+  /* Simulate pack current varying */
+  BMSCriticalInfo.packCurrent = 5.0f * sine_value;  /* +/-5A current */
+  
+  /* Set status to OK */
+  (void)memset(BMS_STATUS, 0x00, sizeof(BMS_STATUS));
+}
 
 static void uart_send_bms_telemetry(void)
 {
@@ -449,9 +503,12 @@ int main(void)
     }
 
     if ((now_ms - last_uart_tx_ms) >= UART_TX_PERIOD_MS) {
+      simulate_bms_data();  /* Simulate varying voltage/temperature for testing */
       uart_send_bms_telemetry();
       last_uart_tx_ms = now_ms;
     }
+
+    simulation_tick++;
   }
   /* USER CODE END 3 */
 }
