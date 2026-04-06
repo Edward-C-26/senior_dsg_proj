@@ -79,6 +79,7 @@ UART_HandleTypeDef huart2;
 
 // Global variables for interrupt handlers and SPI communication
 SPI_HandleTypeDef* ltc_spi;
+SPI_HandleTypeDef* adc_spi;
 int16_t poll_cell_voltages = 0;
 int16_t poll_cell_temps = 0;
 int32_t fault_timer = 0;
@@ -388,16 +389,19 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_SPI1_Init();
-  MX_SPI2_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
   MX_TIM1_Init();
   MX_TIM7_Init();
   MX_TIM13_Init();
   MX_USART1_UART_Init();
+  MX_SPI3_Init();
   /* USER CODE BEGIN 2 */
   // Initialize ltc_spi to point to appropriate SPI handle (SPI1 is used for LTC6811)
   ltc_spi = &hspi1;
+  
+  // Initialize adc_spi to point to appropriate SPI handle (SPI3 is used for ADC)
+  adc_spi = &hspi3;
   
   initPECTable();
   loadConfig(&BMSConfig);

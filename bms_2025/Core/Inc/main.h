@@ -106,6 +106,12 @@ extern int32_t fault_timer;
 #define SWDIO_TC_GPIO_Port GPIOA
 #define SWCLK_TC_Pin GPIO_PIN_14
 #define SWCLK_TC_GPIO_Port GPIOA
+#define SPI_ADC_CS_Pin GPIO_PIN_15
+#define SPI_ADC_CS_GPIO_Port GPIOA
+#define SPI_ADC_SCK_Pin GPIO_PIN_10
+#define SPI_ADC_SCK_GPIO_Port GPIOC
+#define SPI_ADC_MOSI_Pin GPIO_PIN_12
+#define SPI_ADC_MOSI_GPIO_Port GPIOC
 #define IMD_DIAGNOSTIC_Pin GPIO_PIN_3
 #define IMD_DIAGNOSTIC_GPIO_Port GPIOB
 
