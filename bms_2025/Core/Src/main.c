@@ -8,6 +8,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "adc.h"
 #include "spi.h"
 #include "tim.h"
 #include "usart.h"
@@ -95,6 +96,11 @@ static const float VOLTAGE_BASE = 3.7f;    /* Base cell voltage in volts */
 static const float VOLTAGE_AMPLITUDE = 0.3f; /* Varies by +/-0.3V */
 static const float TEMP_BASE = 25.0f;      /* Base temperature in C */
 static const float TEMP_AMPLITUDE = 10.0f; /* Varies by +/-10C */
+
+/* ADC configuration for INA shunt current measurement */
+static const float ADC_REF_VOLTAGE = 3.3f;  /* ADC reference voltage (3.3V) */
+static const float ADC_MAX_VALUE = 4095.0f; /* 12-bit ADC max value */
+static const float SHUNT_RESISTOR = 0.000001f;  /* Shunt resistor value in ohms */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -110,6 +116,7 @@ static void poll_cell_temps_once(void);
 static void refresh_fault_state(void);
 static void handle_balancing(void);
 static void heartbeat_task(void);
+static float read_adc_shunt_current(void);
 
 /* USER CODE END PFP */
 
@@ -236,16 +243,16 @@ static void handle_balancing(void)
   (void)dischargeCellGroups(&BMSConfig, discharge);
 }
 
-/*
- * Blink the debug LED as a visible heartbeat from the main loop.
- *
- * When this LED keeps toggling, it is a quick sign that the firmware is still
- * cycling through its normal background tasks.
- */
-static void heartbeat_task(void)
-{
-  HAL_GPIO_TogglePin(DEBUG_LED_GPIO_Port, DEBUG_LED_Pin);
-}
+// /*
+//  * Blink the debug LED as a visible heartbeat from the main loop.
+//  *
+//  * When this LED keeps toggling, it is a quick sign that the firmware is still
+//  * cycling through its normal background tasks.
+//  */
+// static void heartbeat_task(void)
+// {
+//   HAL_GPIO_TogglePin(DEBUG_LED_GPIO_Port, DEBUG_LED_Pin);
+// }
 
 static uint16_t crc16_ccitt(const uint8_t *data, uint16_t length)
 {
@@ -275,6 +282,44 @@ static uint16_t crc16_ccitt(const uint8_t *data, uint16_t length)
 //     temp_display_cC[i] = (int16_t)((bmsData[i].temperature * 75) / 100);
 //   }
 // }
+
+/**
+  * @brief Read ADC1_IN2 (PA2) INA shunt resistor voltage and convert to current
+  * @return Current in Amperes
+  * 
+  * Conversion: I = V / R, where V is across shunt, R is shunt resistance
+  */
+static float read_adc_shunt_current(void)
+{
+  uint32_t adc_raw;
+  float shunt_voltage;
+  float current;
+  
+  /* Start ADC conversion on channel 2 (PA2) */
+  if (HAL_ADC_Start(&hadc1) != HAL_OK) {
+    return 0.0f;
+  }
+  
+  /* Wait for conversion to complete */
+  if (HAL_ADC_PollForConversion(&hadc1, 100U) != HAL_OK) {
+    return 0.0f;
+  }
+  
+  /* Get the raw ADC value */
+  adc_raw = HAL_ADC_GetValue(&hadc1);
+  
+  /* Stop ADC */
+  HAL_ADC_Stop(&hadc1);
+  
+  /* Convert raw ADC value to voltage across shunt resistor */
+  /* ADC_raw: 0-4095 maps to 0-3.3V */
+  shunt_voltage = (float)adc_raw * ADC_REF_VOLTAGE / ADC_MAX_VALUE;
+  
+  /* Calculate current from shunt resistor: I = V / R */
+  current = shunt_voltage / SHUNT_RESISTOR;
+  
+  return current;
+}
 
 /**
   * @brief Simulate varying BMS data for testing/verification
@@ -315,8 +360,8 @@ static void simulate_bms_data(void)
   /* Simulate pack voltage (sum of cells) */
   BMSCriticalInfo.isoAdcPackVoltage = (VOLTAGE_BASE * 6.0f) + (VOLTAGE_AMPLITUDE * 6.0f * sine_value);
   
-  /* Simulate pack current varying */
-  BMSCriticalInfo.packCurrent = 5.0f * sine_value;  /* +/-5A current */
+  /* Read actual current from ADC1_IN2 (PA2) INA shunt resistor */
+  BMSCriticalInfo.packCurrent = read_adc_shunt_current();
   
   /* Set status to OK */
   (void)memset(BMS_STATUS, 0x00, sizeof(BMS_STATUS));
@@ -443,13 +488,14 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_SPI1_Init();
+  MX_SPI3_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
   MX_TIM1_Init();
   MX_TIM7_Init();
   MX_TIM13_Init();
   MX_USART1_UART_Init();
-  MX_SPI3_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
   // Initialize ltc_spi to point to appropriate SPI handle (SPI1 is used for LTC6811)
   ltc_spi = &hspi1;
@@ -498,12 +544,12 @@ int main(void)
     handle_balancing();
 
     if ((now_ms - last_heartbeat_ms) >= HEARTBEAT_PERIOD_MS) {
-      heartbeat_task();
+      // heartbeat_task();
       last_heartbeat_ms = now_ms;
     }
 
     if ((now_ms - last_uart_tx_ms) >= UART_TX_PERIOD_MS) {
-      simulate_bms_data();  /* Simulate varying voltage/temperature for testing */
+      // simulate_bms_data();  /* Simulate varying voltage/temperature for testing */
       uart_send_bms_telemetry();
       last_uart_tx_ms = now_ms;
     }

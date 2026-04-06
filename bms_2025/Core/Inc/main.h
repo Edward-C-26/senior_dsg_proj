@@ -80,10 +80,6 @@ extern int32_t fault_timer;
 #define HSE_OUT_GPIO_Port GPIOH
 #define SHUTDOWN_ACTIVE_Pin GPIO_PIN_3
 #define SHUTDOWN_ACTIVE_GPIO_Port GPIOC
-#define PRECHARGE_COMPLETE_Pin GPIO_PIN_1
-#define PRECHARGE_COMPLETE_GPIO_Port GPIOA
-#define DEBUG_LED_Pin GPIO_PIN_2
-#define DEBUG_LED_GPIO_Port GPIOA
 #define SPI_UCOMM_CS_Pin GPIO_PIN_4
 #define SPI_UCOMM_CS_GPIO_Port GPIOA
 #define SPI_UCOMM_SCK_Pin GPIO_PIN_5
@@ -110,6 +106,8 @@ extern int32_t fault_timer;
 #define SPI_ADC_CS_GPIO_Port GPIOA
 #define SPI_ADC_SCK_Pin GPIO_PIN_10
 #define SPI_ADC_SCK_GPIO_Port GPIOC
+#define SPI_ADC_MISO_Pin GPIO_PIN_11
+#define SPI_ADC_MISO_GPIO_Port GPIOC
 #define SPI_ADC_MOSI_Pin GPIO_PIN_12
 #define SPI_ADC_MOSI_GPIO_Port GPIOC
 #define IMD_DIAGNOSTIC_Pin GPIO_PIN_3
