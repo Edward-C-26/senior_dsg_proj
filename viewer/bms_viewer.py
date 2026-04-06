@@ -3,26 +3,23 @@ from __future__ import annotations
 
 import argparse
 import csv
-import math
 import os
 import queue
-import random
-import struct
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+# FOR GUI
 import tkinter as tk
 from tkinter import messagebox, ttk
 
 try:
     import serial
     from serial.tools import list_ports
-except ImportError:  # pragma: no cover - handled at runtime
+except ImportError:  
     serial = None
     list_ports = None
 
@@ -30,21 +27,16 @@ except ImportError:  # pragma: no cover - handled at runtime
 VIEWER_DIR = Path(__file__).resolve().parent
 CACHE_DIR = VIEWER_DIR / ".cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
 os.environ.setdefault("MPLCONFIGDIR", str(CACHE_DIR / "matplotlib"))
 os.environ.setdefault("XDG_CACHE_HOME", str(CACHE_DIR))
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
+from telemetry import CELL_COUNT, DemoSerialReaderThread, PacketParser, TelemetryFrame
 
-SOF = b"\xAA\x55"
-LEGACY_PAYLOAD_LEN = 38
-EXTENDED_PAYLOAD_LEN = 40
-LEGACY_PACKET_FORMAT = "<2sBI6H6hH6BH"
-EXTENDED_PACKET_FORMAT = "<2sBI6H6hHh6BH"
-MAX_BUFFER_BYTES = 4096
 
-CELL_COUNT = 6
 UART_BAUD = 115200
 
 VOLTAGE_OV = 4.20
@@ -57,140 +49,26 @@ TEMP_UT = 0.0
 TEMP_WARN_HIGH = 55.0
 TEMP_WARN_LOW = 5.0
 
+# App background color.
 BG = "#F4F1EA"
+# Card/panel background color.
 CARD = "#FFFDF9"
+# Primary text color.
 INK = "#1F2933"
+# Secondary/muted text color.
 MUTED = "#5D6B78"
+# Grid and border accent color.
 GRID = "#D7D2C8"
+# Good/normal state color.
 GOOD = "#2E7D32"
+# Warning state color.
 WARN = "#D4A017"
+# Fault/error state color.
 BAD = "#C0392B"
+# Informational/plot accent color.
 INFO = "#2563EB"
+# Button/interactive accent color.
 ACCENT = "#C56A2D"
-
-
-@dataclass(slots=True)
-class TelemetryFrame:
-    timestamp_ms: int
-    cell_voltage_mv: list[int]
-    cell_temp_c: list[float]
-    pack_voltage_mv: int
-    status_bytes: list[int]
-    pack_current_a: Optional[float]
-    crc_ok: bool = True
-
-    @property
-    def avg_cell_v(self) -> float:
-        return sum(self.cell_voltage_mv) / (len(self.cell_voltage_mv) * 1000.0)
-
-    @property
-    def min_cell_v(self) -> float:
-        return min(self.cell_voltage_mv) / 1000.0
-
-    @property
-    def max_cell_v(self) -> float:
-        return max(self.cell_voltage_mv) / 1000.0
-
-    @property
-    def imbalance_mv(self) -> int:
-        return max(self.cell_voltage_mv) - min(self.cell_voltage_mv)
-
-
-def crc16_ccitt(data: bytes) -> int:
-    crc = 0xFFFF
-    for value in data:
-        crc ^= value << 8
-        for _ in range(8):
-            if crc & 0x8000:
-                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
-            else:
-                crc = (crc << 1) & 0xFFFF
-    return crc
-
-
-class PacketParser:
-    def __init__(self) -> None:
-        self._buffer = bytearray()
-
-    def feed(self, data: bytes) -> list[TelemetryFrame]:
-        self._buffer.extend(data)
-        if len(self._buffer) > MAX_BUFFER_BYTES:
-            del self._buffer[:-MAX_BUFFER_BYTES]
-
-        frames: list[TelemetryFrame] = []
-
-        while True:
-            sof_index = self._buffer.find(SOF)
-            if sof_index < 0:
-                if len(self._buffer) > 1:
-                    del self._buffer[:-1]
-                break
-
-            if sof_index > 0:
-                del self._buffer[:sof_index]
-
-            if len(self._buffer) < 3:
-                break
-
-            payload_len = self._buffer[2]
-            packet_size = payload_len + 3
-
-            if payload_len not in (LEGACY_PAYLOAD_LEN, EXTENDED_PAYLOAD_LEN):
-                del self._buffer[0]
-                continue
-
-            if len(self._buffer) < packet_size:
-                break
-
-            packet_bytes = bytes(self._buffer[:packet_size])
-            expected_crc = struct.unpack_from("<H", packet_bytes, packet_size - 2)[0]
-            computed_crc = crc16_ccitt(packet_bytes[:-2])
-
-            if expected_crc != computed_crc:
-                del self._buffer[0]
-                continue
-
-            frame = self._decode_packet(packet_bytes)
-            frames.append(frame)
-            del self._buffer[:packet_size]
-
-        return frames
-
-    def _decode_packet(self, packet: bytes) -> TelemetryFrame:
-        payload_len = packet[2]
-
-        if payload_len == LEGACY_PAYLOAD_LEN:
-            sof, decoded_payload_len, timestamp_ms, *rest = struct.unpack(LEGACY_PACKET_FORMAT, packet)
-            _ = (sof, decoded_payload_len)
-            cell_voltage_mv = rest[0:6]
-            cell_temp_cc = rest[6:12]
-            pack_voltage_mv = rest[12]
-            status_bytes = rest[13:19]
-            return TelemetryFrame(
-                timestamp_ms=timestamp_ms,
-                cell_voltage_mv=list(cell_voltage_mv),
-                cell_temp_c=[value / 100.0 for value in cell_temp_cc],
-                pack_voltage_mv=pack_voltage_mv,
-                status_bytes=list(status_bytes),
-                pack_current_a=None,
-            )
-
-        sof, decoded_payload_len, timestamp_ms, *rest = struct.unpack(EXTENDED_PACKET_FORMAT, packet)
-        _ = (sof, decoded_payload_len)
-        cell_voltage_mv = rest[0:6]
-        cell_temp_cc = rest[6:12]
-        pack_voltage_mv = rest[12]
-        pack_current_ca = rest[13]
-        status_bytes = rest[14:20]
-        return TelemetryFrame(
-            timestamp_ms=timestamp_ms,
-            cell_voltage_mv=list(cell_voltage_mv),
-            cell_temp_c=[value / 100.0 for value in cell_temp_cc],
-            pack_voltage_mv=pack_voltage_mv,
-            status_bytes=list(status_bytes),
-            pack_current_a=pack_current_ca / 100.0,
-        )
-
 
 class SerialReaderThread(threading.Thread):
     def __init__(
@@ -219,53 +97,12 @@ class SerialReaderThread(threading.Thread):
                     raw = ser.read(256)
                     if not raw:
                         continue
+                    # The reader thread never touches Tk widgets directly. It only
+                    # pushes parsed events into a queue so the main UI thread stays safe.
                     for frame in self._parser.feed(raw):
                         self._queue.put(("frame", frame))
-        except Exception as exc:  # pragma: no cover - runtime serial access
+        except Exception as exc: 
             self._queue.put(("error", f"Serial error: {exc}"))
-
-
-class DemoReaderThread(threading.Thread):
-    def __init__(self, out_queue: queue.Queue[tuple[str, object]], stop_event: threading.Event) -> None:
-        super().__init__(daemon=True)
-        self._queue = out_queue
-        self._stop_event = stop_event
-        self._tick = 0
-
-    def run(self) -> None:
-        self._queue.put(("status", "Demo mode running"))
-        while not self._stop_event.is_set():
-            t = self._tick / 5.0
-            base_mv = [3880, 3905, 3925, 3910, 3895, 3875]
-            ripple = [int(35 * math.sin(t + idx * 0.45)) for idx in range(CELL_COUNT)]
-            voltages = [base + ripple[idx] for idx, base in enumerate(base_mv)]
-
-            temp_a = 28.0 + 4.0 * math.sin(t / 2.0)
-            temp_b = 31.0 + 5.5 * math.cos(t / 2.5)
-            temps = [temp_a, temp_a, temp_a, temp_b, temp_b, temp_b]
-
-            pack_current = 7.0 + 2.5 * math.sin(t / 1.5) + random.uniform(-0.3, 0.3)
-            status0 = 0
-            if max(voltages) > 4180:
-                status0 |= 0x01
-            if min(voltages) < 3050:
-                status0 |= 0x02
-            if max(temps) > 60:
-                status0 |= 0x04
-            if min(temps) < 0:
-                status0 |= 0x08
-
-            frame = TelemetryFrame(
-                timestamp_ms=int(time.time() * 1000),
-                cell_voltage_mv=voltages,
-                cell_temp_c=temps,
-                pack_voltage_mv=sum(voltages),
-                status_bytes=[status0, 0, 0, 0, 0, 0],
-                pack_current_a=pack_current,
-            )
-            self._queue.put(("frame", frame))
-            self._tick += 1
-            time.sleep(0.2)
 
 
 class CellCard(ttk.Frame):
@@ -292,24 +129,33 @@ class CellCard(ttk.Frame):
         self._draw_bar(0.0, GRID)
 
     def update_card(self, voltage_v: float, temp_c: float, color: str, state_text: str) -> None:
+        # Map voltage into a 0..1 fill range for the vertical bar.
         normalized = max(0.0, min(1.0, (voltage_v - 2.8) / 1.5))
+        # Redraw the battery bar using the current state color.
         self._draw_bar(normalized, color)
+        # Show latest voltage and temperature text.
         self.voltage_label.configure(text=f"{voltage_v:.3f} V", foreground=color)
         self.temp_label.configure(text=f"{temp_c:.1f} °C")
+        # Show state label (Normal/Warning/Fault) in matching color.
         self.state_label.configure(text=state_text, foreground=color)
 
     def reset_card(self) -> None:
+        # Return this card to its startup/idle visuals.
         self._draw_bar(0.0, GRID)
         self.voltage_label.configure(text="0.000 V", foreground=INK)
         self.temp_label.configure(text="0.0 °C")
         self.state_label.configure(text="Waiting", foreground=MUTED)
 
     def _draw_bar(self, fill_ratio: float, color: str) -> None:
+        # Clear previous drawing before rendering the new bar state.
         self.canvas.delete("all")
+        # Fixed geometry for the battery outline area.
         left, right, top, bottom = 32, 80, 20, 214
         self.canvas.create_rectangle(left, top, right, bottom, outline=GRID, width=2)
+        # Convert fill ratio into the Y coordinate where fill starts.
         fill_top = bottom - ((bottom - top) * fill_ratio)
         self.canvas.create_rectangle(left + 3, fill_top, right - 3, bottom - 3, fill=color, width=0)
+        # Draw simple low/high voltage reference labels.
         self.canvas.create_text((left + right) / 2, 226, text="2.8V", fill=MUTED, font=("Avenir Next", 9))
         self.canvas.create_text((left + right) / 2, 10, text="4.3V", fill=MUTED, font=("Avenir Next", 9))
 
@@ -350,6 +196,8 @@ class BmsViewerApp:
         self.voltage_history: list[deque[float]] = [deque(maxlen=120) for _ in range(CELL_COUNT)]
         self.temp_history: list[deque[float]] = [deque(maxlen=120) for _ in range(CELL_COUNT)]
         self.current_history: deque[float] = deque(maxlen=120)
+        # These histories back both the summary cards and the optional trends window.
+        # Keeping them bounded makes the UI predictable even if the app stays open all day.
 
         self.soc_estimate = 50.0
         self.soh_estimate = 100.0
@@ -625,26 +473,30 @@ class BmsViewerApp:
             self.port_var.set("")
 
     def connect_serial(self) -> None:
+        # Connect to the selected real UART port.
         port = self.port_var.get().strip()
         if not port:
             messagebox.showerror("UART Port", "Select a serial port first.")
             return
-        self.disconnect_reader()
-        self._reset_telemetry_view()
-        self.reader_stop_event = threading.Event()
-        self.reader_thread = SerialReaderThread(port, UART_BAUD, self.data_queue, self.reader_stop_event)
-        self.reader_thread.start()
+        stop_event = threading.Event()
+        self._start_reader(SerialReaderThread(port, UART_BAUD, self.data_queue, stop_event), stop_event)
         self.status_var.set(f"Opening {port}")
 
     def start_demo(self) -> None:
-        self.disconnect_reader()
-        self._reset_telemetry_view()
-        self.reader_stop_event = threading.Event()
-        self.reader_thread = DemoReaderThread(self.data_queue, self.reader_stop_event)
-        self.reader_thread.start()
-        self.status_var.set("Demo Mode")
+        # Start synthetic telemetry when hardware is not connected.
+        stop_event = threading.Event()
+        self._start_reader(
+            DemoSerialReaderThread(
+                self.data_queue,
+                stop_event,
+                include_current=False,
+            ),
+            stop_event,
+        )
+        self.status_var.set("Demo UART Mode")
 
     def disconnect_reader(self) -> None:
+        # Signal reader thread to stop, then reset UI state.
         if self.reader_stop_event is not None:
             self.reader_stop_event.set()
         self.reader_thread = None
@@ -652,7 +504,15 @@ class BmsViewerApp:
         self._reset_telemetry_view()
         self.status_var.set("Disconnected")
 
+    def _start_reader(self, reader_thread: threading.Thread, stop_event: threading.Event) -> None:
+        # Ensure only one reader thread is active at a time.
+        self.disconnect_reader()
+        self.reader_thread = reader_thread
+        self.reader_stop_event = stop_event
+        self.reader_thread.start()
+
     def toggle_logging(self) -> None:
+        # Toggle CSV logging on/off from the same button.
         if self.logging_enabled:
             self._close_log()
             self.status_var.set("Logging stopped")
@@ -682,6 +542,7 @@ class BmsViewerApp:
         self.status_var.set(f"Logging to {log_path.name}")
 
     def _close_log(self) -> None:
+        # Close file handles cleanly to avoid corrupted CSV output.
         self.logging_enabled = False
         if self.log_file is not None:
             self.log_file.close()
@@ -689,6 +550,7 @@ class BmsViewerApp:
         self.log_writer = None
 
     def _poll_queue(self) -> None:
+        # Drain all pending events from the worker thread queue.
         try:
             while True:
                 kind, payload = self.data_queue.get_nowait()
@@ -702,13 +564,18 @@ class BmsViewerApp:
         except queue.Empty:
             pass
         finally:
+            # Tkinter's `after` loop is our bridge from background threads back into the
+            # GUI event loop. This keeps rendering responsive without blocking on serial I/O.
             self.root.after(100, self._poll_queue)
 
     def _handle_frame(self, frame: TelemetryFrame) -> None:
+        # One incoming frame updates all visual sections and logs.
         now = time.time()
         self.last_frame_time = now
         self.latest_frame = frame
 
+        # We chart against viewer-relative time instead of MCU timestamps because we care
+        # more about a stable live trend than absolute synchronization across sessions.
         relative_t = 0.0 if not self.time_history else self.time_history[-1] + 0.2
         self.time_history.append(relative_t)
         for index in range(CELL_COUNT):
@@ -724,6 +591,7 @@ class BmsViewerApp:
         self._write_log(frame)
 
     def _reset_telemetry_view(self) -> None:
+        # Return dashboard to a neutral "waiting" state.
         self.last_frame_time = None
         self.latest_frame = None
         self.time_history.clear()
@@ -763,6 +631,8 @@ class BmsViewerApp:
             self._clear_plots()
 
     def _update_estimates(self, frame: TelemetryFrame) -> None:
+        # SOC/SOH here are lightweight viewer-side heuristics for quick demos, not a full
+        # battery model. The firmware still owns the ground truth if that is added later.
         self.soc_estimate = max(0.0, min(100.0, ((frame.avg_cell_v - VOLTAGE_UV) / (VOLTAGE_OV - VOLTAGE_UV)) * 100.0))
         spread_penalty = max(0.0, (frame.imbalance_mv - 25) * 0.08)
         temp_penalty = 0.0
@@ -770,9 +640,11 @@ class BmsViewerApp:
         if hottest > 45.0:
             temp_penalty = (hottest - 45.0) * 0.6
         target_soh = max(70.0, min(100.0, 100.0 - spread_penalty - temp_penalty))
+        # Ease toward the new SOH target so the card does not jump around on every frame.
         self.soh_estimate += (target_soh - self.soh_estimate) * 0.02
 
     def _update_summary(self, frame: TelemetryFrame) -> None:
+        # Update top-row metric cards.
         pack_voltage_v = frame.pack_voltage_mv / 1000.0
         self.summary_labels["pack_voltage"].configure(text=f"{pack_voltage_v:.2f} V")
         self.summary_labels["pack_voltage_foot"].configure(text=f"STM32 timestamp {frame.timestamp_ms} ms")
@@ -797,6 +669,7 @@ class BmsViewerApp:
         self.summary_labels["soh_foot"].configure(text="Slow health estimate based on spread and temperature")
 
     def _update_cells(self, frame: TelemetryFrame) -> None:
+        # Push latest per-cell values into each cell card widget.
         for index, card in enumerate(self.cell_cards):
             voltage_v = frame.cell_voltage_mv[index] / 1000.0
             temp_c = frame.cell_temp_c[index]
@@ -804,6 +677,8 @@ class BmsViewerApp:
             card.update_card(voltage_v, temp_c, color, state_text)
 
     def _update_faults(self, frame: TelemetryFrame) -> None:
+        # The first status byte mirrors firmware fault bits; imbalance is derived locally
+        # so we can still surface pack spread even if firmware does not flag it yet.
         status0 = frame.status_bytes[0]
         ov = bool(status0 & 0x01)
         uv = bool(status0 & 0x02)
@@ -824,6 +699,7 @@ class BmsViewerApp:
             self.status_var.set("Live UART Telemetry")
 
     def _update_plots(self) -> None:
+        # Refresh line data only when plot window is open and has data.
         times = list(self.time_history)
         if not times or self.plot_canvas is None or self.voltage_ax is None or self.temp_ax is None or self.current_ax is None or self.current_line is None:
             return
@@ -832,6 +708,8 @@ class BmsViewerApp:
             self.voltage_lines[index].set_data(times, list(self.voltage_history[index]))
             self.temp_lines[index].set_data(times, list(self.temp_history[index]))
             latest_voltage = self.voltage_history[index][-1]
+            # Move the inline label with the newest point so the user can identify lines
+            # without a separate legend eating up space in a small window.
             label_x = times[-1] + 0.15
             self.voltage_line_labels[index].set_position((label_x, latest_voltage))
         self.current_line.set_data(times, list(self.current_history))
@@ -844,6 +722,7 @@ class BmsViewerApp:
         self.plot_canvas.draw_idle()
 
     def _clear_plots(self) -> None:
+        # Clear existing traces after disconnect/reset.
         if self.plot_canvas is None or self.voltage_ax is None or self.temp_ax is None or self.current_ax is None or self.current_line is None:
             return
 
@@ -863,10 +742,13 @@ class BmsViewerApp:
         self.plot_canvas.draw_idle()
 
     def _watchdog_link(self) -> None:
+        # Periodically mark comm health based on time since last valid frame.
         if self.last_frame_time is None:
             self.fault_badges["Comm"].set_state(False, "Waiting")
         else:
             age = time.time() - self.last_frame_time
+            # Treat a 1 second gap as a comm issue. Normal telemetry is expected roughly
+            # every 200 ms, so this leaves room for jitter without hiding a dropped link.
             if age > 1.0:
                 self.fault_badges["Comm"].set_state(True, "Timeout")
                 if self.status_var.get() == "Live UART Telemetry":
@@ -876,6 +758,7 @@ class BmsViewerApp:
         self.root.after(1000, self._watchdog_link)
 
     def _write_log(self, frame: TelemetryFrame) -> None:
+        # Append one CSV row per telemetry frame.
         if not self.logging_enabled or self.log_writer is None or self.log_file is None:
             return
 
