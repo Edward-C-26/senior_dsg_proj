@@ -6,9 +6,13 @@
   ******************************************************************************
   */
 /* USER CODE END Header */
-
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "adc.h"
+#include "spi.h"
+#include "tim.h"
+#include "usart.h"
+#include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -62,20 +66,6 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-SPI_HandleTypeDef hspi1;
-SPI_HandleTypeDef hspi2;
-SPI_HandleTypeDef hspi3;
-
-SPI_HandleTypeDef* ltc_spi = &hspi1;
-
-TIM_HandleTypeDef htim1;
-TIM_HandleTypeDef htim2;
-TIM_HandleTypeDef htim3;
-TIM_HandleTypeDef htim7;
-TIM_HandleTypeDef htim13;
-
-UART_HandleTypeDef huart2;
-static uint32_t last_uart_tx_ms = 0U;
 
 /* USER CODE BEGIN PV */
 CellData bmsData[NUM_CELLS];
@@ -86,39 +76,47 @@ volatile bool bmsFault = false;
 
 BMS_critical_info_t BMSCriticalInfo;
 static BMSConfigStructTypedef BMSConfig;
+UART_HandleTypeDef huart2;
+
+// Global variables for interrupt handlers and SPI communication
+SPI_HandleTypeDef* ltc_spi;
+SPI_HandleTypeDef* adc_spi;
+int16_t poll_cell_voltages = 0;
+int16_t poll_cell_temps = 0;
+int32_t fault_timer = 0;
 
 static uint32_t last_voltage_poll_ms = 0U;
 static uint32_t last_temp_poll_ms = 0U;
 static uint32_t last_heartbeat_ms = 0U;
+static uint32_t last_uart_tx_ms = 0U;
+
+/* Simulation variables for testing BMS viewer */
+static uint32_t simulation_tick = 0U;
+static const float VOLTAGE_BASE = 3.7f;    /* Base cell voltage in volts */
+static const float VOLTAGE_AMPLITUDE = 0.3f; /* Varies by +/-0.3V */
+static const float TEMP_BASE = 25.0f;      /* Base temperature in C */
+static const float TEMP_AMPLITUDE = 10.0f; /* Varies by +/-10C */
+
+/* ADC configuration for INA shunt current measurement */
+static const float ADC_REF_VOLTAGE = 3.3f;  /* ADC reference voltage (3.3V) */
+static const float ADC_MAX_VALUE = 4095.0f; /* 12-bit ADC max value */
+static const float SHUNT_RESISTOR = 0.000001f;  /* Shunt resistor value in ohms */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-static void MX_GPIO_Init(void);
-static void MX_SPI1_Init(void);
-static void MX_SPI2_Init(void);
-static void MX_SPI3_Init(void);
-static void MX_TIM1_Init(void);
-static void MX_TIM2_Init(void);
-static void MX_TIM3_Init(void);
-static void MX_TIM7_Init(void);
-static void MX_TIM13_Init(void);
-
 /* USER CODE BEGIN PFP */
 static void clear_all_discharge_requests(bool discharge_matrix[NUM_BOARDS][12]);
 static void stop_all_balancing(BMSConfigStructTypedef *cfg, bool discharge_matrix[NUM_BOARDS][12]);
 static bool pack_is_safe_for_discharge(const uint8_t status[6]);
 static uint16_t get_cell_imbalance_counts(const BMS_critical_info_t *bms);
 static void poll_cell_voltages_once(void);
+static void simulate_bms_data(void);
 static void poll_cell_temps_once(void);
 static void refresh_fault_state(void);
 static void handle_balancing(void);
 static void heartbeat_task(void);
-
-static void MX_USART2_UART_Init(void);
-static uint16_t crc16_ccitt(const uint8_t *data, uint16_t length);
-static void build_display_temperatures_cC(int16_t temp_display_cC[NUM_USED_CELLS]);
-static void uart_send_bms_telemetry(void);
+static float read_adc_shunt_current(void);
 
 /* USER CODE END PFP */
 
@@ -214,7 +212,7 @@ static void poll_cell_temps_once(void)
  */
 static void refresh_fault_state(void)
 {
-  bmsFault = FAULT_check(&BMSCriticalInfo, &BMSConfig, BMS_STATUS);
+  // bmsFault = FAULT_check(&BMSCriticalInfo, &BMSConfig, BMS_STATUS); temporarily diable fault checking for testing without slave 
 
   if (bmsFault) {
       HAL_GPIO_WritePin(BMS_FLT_EN_GPIO_Port, BMS_FLT_EN_Pin, GPIO_PIN_SET);
@@ -245,15 +243,201 @@ static void handle_balancing(void)
   (void)dischargeCellGroups(&BMSConfig, discharge);
 }
 
-/*
- * Blink the debug LED as a visible heartbeat from the main loop.
- *
- * When this LED keeps toggling, it is a quick sign that the firmware is still
- * cycling through its normal background tasks.
- */
-static void heartbeat_task(void)
+// /*
+//  * Blink the debug LED as a visible heartbeat from the main loop.
+//  *
+//  * When this LED keeps toggling, it is a quick sign that the firmware is still
+//  * cycling through its normal background tasks.
+//  */
+// static void heartbeat_task(void)
+// {
+//   HAL_GPIO_TogglePin(DEBUG_LED_GPIO_Port, DEBUG_LED_Pin);
+// }
+
+static uint16_t crc16_ccitt(const uint8_t *data, uint16_t length)
 {
-  HAL_GPIO_TogglePin(DEBUG_LED_GPIO_Port, DEBUG_LED_Pin);
+  uint16_t crc = 0xFFFFU;
+  uint16_t i;
+
+  for (i = 0U; i < length; i++) {
+    uint8_t j;
+    crc ^= ((uint16_t)data[i] << 8U);
+    for (j = 0U; j < 8U; j++) {
+      if ((crc & 0x8000U) != 0U) {
+        crc = (uint16_t)((crc << 1U) ^ 0x1021U);
+      } else {
+        crc = (uint16_t)(crc << 1U);
+      }
+    }
+  }
+
+  return crc;
+}
+
+// static void build_display_temperatures_cC(int16_t temp_display_cC[NUM_USED_CELLS])
+// {
+//   uint8_t i;
+//   for (i = 0U; i < NUM_USED_CELLS; i++) {
+//     /* LTC6811 temperature is raw ADC count: 1 LSB = 0.75°C */
+//     temp_display_cC[i] = (int16_t)((bmsData[i].temperature * 75) / 100);
+//   }
+// }
+
+/**
+  * @brief Read ADC1_IN2 (PA2) INA shunt resistor voltage and convert to current
+  * @return Current in Amperes
+  * 
+  * Conversion: I = V / R, where V is across shunt, R is shunt resistance
+  */
+static float read_adc_shunt_current(void)
+{
+  uint32_t adc_raw;
+  float shunt_voltage;
+  float current;
+  
+  /* Start ADC conversion on channel 2 (PA2) */
+  if (HAL_ADC_Start(&hadc1) != HAL_OK) {
+    return 0.0f;
+  }
+  
+  /* Wait for conversion to complete */
+  if (HAL_ADC_PollForConversion(&hadc1, 100U) != HAL_OK) {
+    return 0.0f;
+  }
+  
+  /* Get the raw ADC value */
+  adc_raw = HAL_ADC_GetValue(&hadc1);
+  
+  /* Stop ADC */
+  HAL_ADC_Stop(&hadc1);
+  
+  /* Convert raw ADC value to voltage across shunt resistor */
+  /* ADC_raw: 0-4095 maps to 0-3.3V */
+  shunt_voltage = (float)adc_raw * ADC_REF_VOLTAGE / ADC_MAX_VALUE;
+  
+  /* Calculate current from shunt resistor: I = V / R */
+  current = shunt_voltage / SHUNT_RESISTOR;
+  
+  return current;
+}
+
+/**
+  * @brief Simulate varying BMS data for testing/verification
+  * Generates sine-wave varying cell voltages and temperatures
+  */
+static void simulate_bms_data(void)
+{
+  uint8_t i;
+  float sine_value;
+  static const float PI = 3.14159265359f;
+  
+  /* Generate sine wave that cycles every ~10 seconds */
+  float phase = (2.0f * PI * (float)(simulation_tick % 50)) / 50.0f;
+  
+  /* Simple sine approximation using symmetry */
+  if (phase < PI) {
+    sine_value = 2.0f * phase / PI - 1.0f;
+  } else {
+    sine_value = 3.0f - 2.0f * phase / PI;
+  }
+  
+  /* Clip to [-1, 1] */
+  if (sine_value > 1.0f) sine_value = 1.0f;
+  if (sine_value < -1.0f) sine_value = -1.0f;
+  
+  /* Simulate 6 cell voltages varying around base voltage */
+  for (i = 0U; i < NUM_USED_CELLS; i++) {
+    float cell_voltage = VOLTAGE_BASE + (VOLTAGE_AMPLITUDE * sine_value);
+    bmsData[i].voltage = (uint16_t)(cell_voltage * 10000.0f);  /* Store in 100uV units */
+  }
+  
+  /* Simulate cell temperatures varying */
+  for (i = 0U; i < NUM_USED_CELLS; i++) {
+    float cell_temp = TEMP_BASE + (TEMP_AMPLITUDE * sine_value);
+    bmsData[i].temperature = (int16_t)(cell_temp * 100.0f) / 100;  /* Store in C */
+  }
+  
+  /* Simulate pack voltage (sum of cells) */
+  BMSCriticalInfo.isoAdcPackVoltage = (VOLTAGE_BASE * 6.0f) + (VOLTAGE_AMPLITUDE * 6.0f * sine_value);
+  
+  /* Read actual current from ADC1_IN2 (PA2) INA shunt resistor */
+  BMSCriticalInfo.packCurrent = read_adc_shunt_current();
+  
+  /* Set status to OK */
+  (void)memset(BMS_STATUS, 0x00, sizeof(BMS_STATUS));
+}
+
+static void uart_send_bms_telemetry(void)
+{
+  typedef struct __attribute__((packed)) {
+    uint8_t sof1;
+    uint8_t sof2;
+    uint8_t length;
+    uint32_t timestamp_ms;
+    uint16_t cell_voltage_mV[6];
+    int16_t cell_temp_cC[6];
+    uint16_t pack_voltage_mV;
+    int16_t pack_current_deciA;
+    uint8_t status[6];
+    uint16_t crc;
+  } BmsUartPacket_t;
+
+  BmsUartPacket_t packet;
+  uint8_t packet_data[43];
+  uint8_t i;
+
+  packet.sof1 = UART_BMS_PACKET_SOF1;
+  packet.sof2 = UART_BMS_PACKET_SOF2;
+  packet.length = 37U;
+  packet.timestamp_ms = HAL_GetTick();
+
+  for (i = 0U; i < NUM_USED_CELLS; i++) {
+    /* LTC6811 voltage: 1 LSB = 100uV = 0.0001V, convert to mV */
+    packet.cell_voltage_mV[i] = (uint16_t)((bmsData[i].voltage * 100U) / 1000U);
+  }
+
+  /* Temperature array converted in-place */
+  for (i = 0U; i < NUM_USED_CELLS; i++) {
+    packet.cell_temp_cC[i] = (int16_t)((bmsData[i].temperature * 75) / 100);
+  }
+
+  /* Pack voltage: convert from float volts to mV */
+  packet.pack_voltage_mV = (uint16_t)(BMSCriticalInfo.isoAdcPackVoltage * 1000.0f);
+  packet.pack_current_deciA = (int16_t)(BMSCriticalInfo.packCurrent * 10.0f);
+
+  (void)memcpy(packet.status, BMS_STATUS, sizeof(packet.status));
+
+  packet_data[0] = packet.sof1;
+  packet_data[1] = packet.sof2;
+  packet_data[2] = packet.length;
+  packet_data[3] = (uint8_t)((packet.timestamp_ms >> 0U) & 0xFFU);
+  packet_data[4] = (uint8_t)((packet.timestamp_ms >> 8U) & 0xFFU);
+  packet_data[5] = (uint8_t)((packet.timestamp_ms >> 16U) & 0xFFU);
+  packet_data[6] = (uint8_t)((packet.timestamp_ms >> 24U) & 0xFFU);
+
+  for (i = 0U; i < NUM_USED_CELLS; i++) {
+    packet_data[7U + (i * 2U)] = (uint8_t)((packet.cell_voltage_mV[i] >> 0U) & 0xFFU);
+    packet_data[8U + (i * 2U)] = (uint8_t)((packet.cell_voltage_mV[i] >> 8U) & 0xFFU);
+  }
+
+  for (i = 0U; i < NUM_USED_CELLS; i++) {
+    uint16_t temp_u16 = (uint16_t)(packet.cell_temp_cC[i] & 0xFFFF);
+    packet_data[19U + (i * 2U)] = (uint8_t)((temp_u16 >> 0U) & 0xFFU);
+    packet_data[20U + (i * 2U)] = (uint8_t)((temp_u16 >> 8U) & 0xFFU);
+  }
+
+  packet_data[31U] = (uint8_t)((packet.pack_voltage_mV >> 0U) & 0xFFU);
+  packet_data[32U] = (uint8_t)((packet.pack_voltage_mV >> 8U) & 0xFFU);
+  packet_data[33U] = (uint8_t)((packet.pack_current_deciA >> 0U) & 0x00FF);
+  packet_data[34U] = (uint8_t)((packet.pack_current_deciA >> 8U) & 0x00FF);
+
+  (void)memcpy(&packet_data[35U], packet.status, 6U);
+
+  packet.crc = crc16_ccitt(packet_data, 41U);
+  packet_data[41U] = (uint8_t)((packet.crc >> 0U) & 0xFFU);
+  packet_data[42U] = (uint8_t)((packet.crc >> 8U) & 0xFFU);
+
+  (void)HAL_UART_Transmit(&huart2, (uint8_t *)packet_data, 43U, 100U);
 }
 
 static void MX_USART2_UART_Init(void)
@@ -274,30 +458,51 @@ static void MX_USART2_UART_Init(void)
 
 /* USER CODE END 0 */
 
-/*
- * Bring up the MCU, initialize the peripherals this firmware uses, load the
- * BMS configuration, and then stay in the background polling loop.
- *
- * The loop is intentionally straightforward: sample voltages, sample
- * temperatures, refresh faults, and let the balancing logic make decisions
- * based on the newest data.
- */
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
 int main(void)
 {
+
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
   SystemClock_Config();
 
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_SPI1_Init();
-  MX_SPI2_Init();
   MX_SPI3_Init();
-  MX_TIM1_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
+  MX_TIM1_Init();
   MX_TIM7_Init();
   MX_TIM13_Init();
-
+  MX_USART1_UART_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
+  // Initialize ltc_spi to point to appropriate SPI handle (SPI1 is used for LTC6811)
+  ltc_spi = &hspi1;
+  
+  // Initialize adc_spi to point to appropriate SPI handle (SPI3 is used for ADC)
+  adc_spi = &hspi3;
+  
   initPECTable();
   loadConfig(&BMSConfig);
   init_BMS_info(&BMSCriticalInfo);
@@ -316,51 +521,61 @@ int main(void)
   last_uart_tx_ms = HAL_GetTick();
   /* USER CODE END 2 */
 
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
   while (1)
   {
-    const uint32_t now = HAL_GetTick();
+    /* USER CODE END WHILE */
 
-    if ((now - last_voltage_poll_ms) >= VOLTAGE_POLL_PERIOD_MS) {
-      last_voltage_poll_ms = now;
+    /* USER CODE BEGIN 3 */
+    uint32_t now_ms = HAL_GetTick();
+
+    if ((now_ms - last_voltage_poll_ms) >= VOLTAGE_POLL_PERIOD_MS) {
       poll_cell_voltages_once();
-      refresh_fault_state();
+      last_voltage_poll_ms = now_ms;
     }
 
-    if ((now - last_temp_poll_ms) >= TEMP_POLL_PERIOD_MS) {
-      last_temp_poll_ms = now;
+    if ((now_ms - last_temp_poll_ms) >= TEMP_POLL_PERIOD_MS) {
       poll_cell_temps_once();
-      refresh_fault_state();
+      last_temp_poll_ms = now_ms;
     }
 
+    refresh_fault_state();
     handle_balancing();
 
-    if ((now - last_heartbeat_ms) >= HEARTBEAT_PERIOD_MS) {
-      last_heartbeat_ms = now;
-      heartbeat_task();
+    if ((now_ms - last_heartbeat_ms) >= HEARTBEAT_PERIOD_MS) {
+      // heartbeat_task();
+      last_heartbeat_ms = now_ms;
     }
 
-    if ((now - last_uart_tx_ms) >= UART_TX_PERIOD_MS) {
-      last_uart_tx_ms = now;
+    if ((now_ms - last_uart_tx_ms) >= UART_TX_PERIOD_MS) {
+      // simulate_bms_data();  /* Simulate varying voltage/temperature for testing */
       uart_send_bms_telemetry();
+      last_uart_tx_ms = now_ms;
     }
+
+    simulation_tick++;
   }
+  /* USER CODE END 3 */
 }
 
-/*
- * Set up a simple clock tree using the internal high-speed oscillator.
- *
- * This keeps the system clock configuration easy to reason about during bring
- * up and avoids introducing PLL-related complexity in the main application
- * file.
- */
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
+  /** Configure the main internal regulator output voltage
+  */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
 
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
@@ -370,7 +585,10 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
@@ -382,423 +600,38 @@ void SystemClock_Config(void)
   }
 }
 
-/*
- * Initialize SPI1 as a master peripheral.
- *
- * These settings define the clock mode and transfer format expected by the
- * device connected to this bus.
- */
-static void MX_SPI1_Init(void)
-{
-  hspi1.Instance = SPI1;
-  hspi1.Init.Mode = SPI_MODE_MASTER;
-  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
-  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
-  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
-  hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
-  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
-  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
-  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
-  hspi1.Init.CRCPolynomial = 10;
-  if (HAL_SPI_Init(&hspi1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-}
+/* USER CODE BEGIN 4 */
 
-/*
- * Initialize SPI2 with the timing required by the device on that interface.
- *
- * The phase and prescaler differ from SPI1 because this bus is serving a
- * different peripheral.
- */
-static void MX_SPI2_Init(void)
-{
-  hspi2.Instance = SPI2;
-  hspi2.Init.Mode = SPI_MODE_MASTER;
-  hspi2.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi2.Init.DataSize = SPI_DATASIZE_8BIT;
-  hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
-  hspi2.Init.CLKPhase = SPI_PHASE_2EDGE;
-  hspi2.Init.NSS = SPI_NSS_SOFT;
-  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
-  hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
-  hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
-  hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
-  hspi2.Init.CRCPolynomial = 10;
-  if (HAL_SPI_Init(&hspi2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-}
+/* USER CODE END 4 */
 
-/*
- * Initialize SPI3 as another master bus for board peripherals.
- */
-static void MX_SPI3_Init(void)
-{
-  hspi3.Instance = SPI3;
-  hspi3.Init.Mode = SPI_MODE_MASTER;
-  hspi3.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi3.Init.DataSize = SPI_DATASIZE_8BIT;
-  hspi3.Init.CLKPolarity = SPI_POLARITY_LOW;
-  hspi3.Init.CLKPhase = SPI_PHASE_1EDGE;
-  hspi3.Init.NSS = SPI_NSS_SOFT;
-  hspi3.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
-  hspi3.Init.FirstBit = SPI_FIRSTBIT_MSB;
-  hspi3.Init.TIMode = SPI_TIMODE_DISABLE;
-  hspi3.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
-  hspi3.Init.CRCPolynomial = 10;
-  if (HAL_SPI_Init(&hspi3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-}
-
-/*
- * Configure TIM1 as a base timer with an internal clock source.
- *
- * No special trigger routing is used here; the timer is simply prepared for
- * later scheduling or timing work elsewhere in the firmware.
- */
-static void MX_TIM1_Init(void)
-{
-  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-
-  htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 1;
-  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 62499;
-  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim1.Init.RepetitionCounter = 0;
-  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
-  if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-}
-
-/*
- * Configure TIM2 for input-capture operation on channel 2.
- *
- * This lets the firmware timestamp incoming edges if another subsystem needs a
- * measured external signal.
- */
-static void MX_TIM2_Init(void)
-{
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-  TIM_IC_InitTypeDef sConfigIC = {0};
-
-  htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 0;
-  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 4294967295U;
-  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_IC_Init(&htim2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
-  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
-  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
-  sConfigIC.ICFilter = 0;
-  if (HAL_TIM_IC_ConfigChannel(&htim2, &sConfigIC, TIM_CHANNEL_2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-}
-
-/*
- * Configure TIM3 for PWM generation on channel 1.
- *
- * The post-init call finishes the pin-side setup after the timer itself is
- * configured.
- */
-static void MX_TIM3_Init(void)
-{
-  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-  TIM_OC_InitTypeDef sConfigOC = {0};
-
-  htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 0;
-  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 1;
-  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 1;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  HAL_TIM_MspPostInit(&htim3);
-}
-
-/*
- * Configure TIM7 as a simple periodic base timer.
- */
-static void MX_TIM7_Init(void)
-{
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-
-  htim7.Instance = TIM7;
-  htim7.Init.Prescaler = 0;
-  htim7.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim7.Init.Period = 31999;
-  htim7.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
-  if (HAL_TIM_Base_Init(&htim7) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim7, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-}
-
-/*
- * Configure TIM13 as an additional free-running time base.
- */
-static void MX_TIM13_Init(void)
-{
-  htim13.Instance = TIM13;
-  htim13.Init.Prescaler = 495;
-  htim13.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim13.Init.Period = 64515;
-  htim13.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim13.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim13) != HAL_OK)
-  {
-    Error_Handler();
-  }
-}
-
-/*
- * Initialize the GPIO used directly by this firmware.
- *
- * Output levels are written before the pins are switched into output mode so
- * attached hardware does not see a brief unintended pulse during startup.
- */
-static void MX_GPIO_Init(void)
-{
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-
-  __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOH_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
-
-  HAL_GPIO_WritePin(BMS_FLT_EN_GPIO_Port, BMS_FLT_EN_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(DEBUG_LED_GPIO_Port, DEBUG_LED_Pin, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(SPI_UCOMM_CS_GPIO_Port, SPI_UCOMM_CS_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(SPI_FERAM_CS_GPIO_Port, SPI_FERAM_CS_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(SPI_ADC_CS_GPIO_Port, SPI_ADC_CS_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(ADC_RST_GPIO_Port, ADC_RST_Pin, GPIO_PIN_SET);
-
-  GPIO_InitStruct.Pin = BMS_FLT_EN_Pin | ADC_RST_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-
-  GPIO_InitStruct.Pin = SHUTDOWN_ACTIVE_Pin | LV_PWR_MONITOR_Pin | ADC_DRDY_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-
-  GPIO_InitStruct.Pin = PRECHARGE_COMPLETE_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(PRECHARGE_COMPLETE_GPIO_Port, &GPIO_InitStruct);
-
-  GPIO_InitStruct.Pin = DEBUG_LED_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  HAL_GPIO_Init(DEBUG_LED_GPIO_Port, &GPIO_InitStruct);
-
-  GPIO_InitStruct.Pin = SPI_UCOMM_CS_Pin | SPI_FERAM_CS_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  GPIO_InitStruct.Pin = SPI_ADC_CS_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(SPI_ADC_CS_GPIO_Port, &GPIO_InitStruct);
-
-  GPIO_InitStruct.Pin = CHARGE_EN_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(CHARGE_EN_GPIO_Port, &GPIO_InitStruct);
-}
-
-
-#pragma pack(push, 1)
-typedef struct
-{
-  uint8_t sof1;
-  uint8_t sof2;
-  uint8_t payload_len;
-  uint32_t timestamp_ms;
-
-  uint16_t cell_voltage_mV[NUM_USED_CELLS];
-  int16_t cell_temp_cC[NUM_USED_CELLS];
-
-  uint16_t pack_voltage_mV;
-  uint8_t status_bytes[6];
-
-  uint16_t crc;
-} BmsUartPacket_t;
-#pragma pack(pop)
-
-static uint16_t crc16_ccitt(const uint8_t *data, uint16_t length)
-{
-  uint16_t crc = 0xFFFFU;
-
-  for (uint16_t i = 0U; i < length; i++) {
-      crc ^= (uint16_t)((uint16_t)data[i] << 8);
-
-      for (uint8_t bit = 0U; bit < 8U; bit++) {
-          if ((crc & 0x8000U) != 0U) {
-              crc = (uint16_t)((crc << 1) ^ 0x1021U);
-          } else {
-              crc <<= 1;
-          }
-      }
-  }
-
-  return crc;
-}
-
-static void build_display_temperatures_cC(int16_t temp_display_cC[NUM_USED_CELLS])
-{
-  int16_t t1_cC = 0;
-  int16_t t2_cC = 0;
-
-  /* Use representative cell from each thermistor group */
-  t1_cC = (int16_t)(bmsData[0].temperature / 10U);
-  t2_cC = (int16_t)(bmsData[3].temperature / 10U);
-
-  temp_display_cC[0] = t1_cC;
-  temp_display_cC[1] = t1_cC;
-  temp_display_cC[2] = t1_cC;
-  temp_display_cC[3] = t2_cC;
-  temp_display_cC[4] = t2_cC;
-  temp_display_cC[5] = t2_cC;
-}
-
-static void uart_send_bms_telemetry(void)
-{
-  BmsUartPacket_t packet;
-  int16_t expandedTemps[NUM_USED_CELLS];
-  uint16_t crc_input_len;
-
-  memset(&packet, 0, sizeof(packet));
-
-  packet.sof1 = UART_BMS_PACKET_SOF1;
-  packet.sof2 = UART_BMS_PACKET_SOF2;
-  packet.payload_len = (uint8_t)(sizeof(BmsUartPacket_t) - 3U); /* excludes sof1, sof2, payload_len */
-  packet.timestamp_ms = HAL_GetTick();
-
-  for (uint8_t i = 0U; i < NUM_USED_CELLS; i++) {
-    /*
-      * Cell voltage code to mV
-      * 42000 -> 4200 mV
-      */
-    packet.cell_voltage_mV[i] = (uint16_t)(bmsData[i].voltage / 10U);
-}
-
-  build_display_temperatures_cC(expandedTemps);
-
-  for (uint8_t i = 0U; i < NUM_USED_CELLS; i++) {
-    packet.cell_temp_cC[i] = expandedTemps[i];
-  }
-
-  packet.pack_voltage_mV = BMSCriticalInfo.cellMonitorPackVoltage;
-
-  for (uint8_t i = 0U; i < 6U; i++) {
-    packet.status_bytes[i] = BMS_STATUS[i];
-  }
-
-  crc_input_len = (uint16_t)(sizeof(BmsUartPacket_t) - sizeof(packet.crc));
-  packet.crc = crc16_ccitt((const uint8_t *)&packet, crc_input_len);
-
-  (void)HAL_UART_Transmit(&huart2, (uint8_t *)&packet, sizeof(packet), 50U);
-}
-
-
-/*
- * Stop normal execution after an unrecoverable error.
- *
- * Once we get here, interrupts are disabled and the firmware stays in a tight
- * loop so the failure is obvious during debugging.
- */
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
 void Error_Handler(void)
 {
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
+  /* USER CODE END Error_Handler_Debug */
 }
 
-#ifdef USE_FULL_ASSERT
-/*
- * HAL assertion hook.
- *
- * The file and line are currently unused, but the function is kept so full
- * assert builds still have a defined landing point.
- */
+#ifdef  USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-  (void)file;
-  (void)line;
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
 }
-#endif
+#endif /* USE_FULL_ASSERT */
