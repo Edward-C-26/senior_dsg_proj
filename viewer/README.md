@@ -15,7 +15,6 @@ UART desktop viewer for the STM32 + LTC6811 senior design BMS.
 ## Packet Support
 
 - Current firmware packet from `bms_2025/Core/Src/main.c`
-- Future-ready packet variant with a signed pack current field after `pack_voltage_mV`
 
 ## Run
 
@@ -33,5 +32,5 @@ python3 viewer/bms_viewer.py --demo
 UART simulation:
 
 ```bash
-python3 viewer/uart_sim.py --port /dev/tty.usbmodemXXXX --mode extended
+python3 viewer/uart_sim.py --port /dev/tty.usbmodemXXXX
 ```

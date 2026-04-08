@@ -14,13 +14,12 @@ SOF = b"\xAA\x55"
 CELL_COUNT = 6
 
 
-LEGACY_PAYLOAD_LEN = 38
-EXTENDED_PAYLOAD_LEN = 40
+# Current firmware payload length: timestamp through CRC.
+FIRMWARE_LENGTH_BYTE = 40
+FIRMWARE_PACKET_SIZE = 43
 
-# Legacy packet layout: SOF, len, timestamp, cells, temps, pack V, status, CRC.
-LEGACY_PACKET_FORMAT = "<2sBI6H6hH6BH"
-# Extended packet layout: same as legacy + signed pack current field.
-EXTENDED_PACKET_FORMAT = "<2sBI6H6hHh6BH"
+# Firmware packet layout: SOF, len, timestamp, cells, temps, pack V, current, status, CRC.
+FIRMWARE_PACKET_FORMAT = "<2sBI6H6hHh6BH"
 
 MAX_BUFFER_BYTES = 4096
 DEFAULT_PACKET_PERIOD_S = 0.2
@@ -38,8 +37,8 @@ class TelemetryFrame:
     pack_voltage_mv: int
     # Raw status bytes from firmware/device.
     status_bytes: list[int]
-    # Optional pack current in amps (None for legacy packet).
-    pack_current_a: Optional[float]
+    # Pack current in amps.
+    pack_current_a: float
     # CRC validity flag (currently set true on decode success).
     crc_ok: bool = True
 
@@ -114,13 +113,13 @@ class PacketParser:
 
             # Read payload length from packet header.
             payload_len = self._buffer[2]
-            # Reject unknown packet variants.
-            if payload_len not in (LEGACY_PAYLOAD_LEN, EXTENDED_PAYLOAD_LEN):
+            # Reject unknown packet formats.
+            if payload_len != FIRMWARE_LENGTH_BYTE:
                 del self._buffer[0]
                 continue
 
             # Total packet bytes = SOF(2) + len(1) + payload.
-            packet_size = payload_len + 3
+            packet_size = FIRMWARE_PACKET_SIZE
             # Wait for more bytes if packet is incomplete.
             if len(self._buffer) < packet_size:
                 break
@@ -145,32 +144,11 @@ class PacketParser:
 
 
 def decode_packet(packet: bytes) -> TelemetryFrame:
-    # Packet type is selected by payload length byte.
-    payload_len = packet[2]
-
-    if payload_len == LEGACY_PAYLOAD_LEN:
-        # Legacy packet has no pack current field.
-        _, _, timestamp_ms, *rest = struct.unpack(LEGACY_PACKET_FORMAT, packet)
-        cell_voltage_mv = rest[0:6]
-        cell_temp_cc = rest[6:12]
-        pack_voltage_mv = rest[12]
-        status_bytes = rest[13:19]
-        return TelemetryFrame(
-            timestamp_ms=timestamp_ms,
-            cell_voltage_mv=list(cell_voltage_mv),
-            # Temperatures are stored as centi-degrees C.
-            cell_temp_c=[value / 100.0 for value in cell_temp_cc],
-            pack_voltage_mv=pack_voltage_mv,
-            status_bytes=list(status_bytes),
-            pack_current_a=None,
-        )
-
-    # Extended packet includes signed pack current in centi-amps.
-    _, _, timestamp_ms, *rest = struct.unpack(EXTENDED_PACKET_FORMAT, packet)
+    _, _, timestamp_ms, *rest = struct.unpack(FIRMWARE_PACKET_FORMAT, packet)
     cell_voltage_mv = rest[0:6]
     cell_temp_cc = rest[6:12]
     pack_voltage_mv = rest[12]
-    pack_current_ca = rest[13]
+    pack_current_decia = rest[13]
     status_bytes = rest[14:20]
     return TelemetryFrame(
         timestamp_ms=timestamp_ms,
@@ -179,38 +157,12 @@ def decode_packet(packet: bytes) -> TelemetryFrame:
         cell_temp_c=[value / 100.0 for value in cell_temp_cc],
         pack_voltage_mv=pack_voltage_mv,
         status_bytes=list(status_bytes),
-        # Convert centi-amps back to amps.
-        pack_current_a=pack_current_ca / 100.0,
+        # Firmware stores current as signed deci-amps.
+        pack_current_a=pack_current_decia / 10.0,
     )
 
 
-def build_legacy_packet(
-    timestamp_ms: int,
-    cell_voltage_mv: list[int],
-    cell_temp_c: list[float],
-    pack_voltage_mv: int,
-    status_bytes: list[int],
-) -> bytes:
-    # Convert temperature floats to signed centi-degrees for transport.
-    temps_cc = [int(round(value * 100.0)) for value in cell_temp_c]
-    # Pack structure with placeholder CRC at the end.
-    packet = struct.pack(
-        LEGACY_PACKET_FORMAT,
-        SOF,
-        LEGACY_PAYLOAD_LEN,
-        timestamp_ms & 0xFFFFFFFF,
-        *cell_voltage_mv,
-        *temps_cc,
-        pack_voltage_mv,
-        *status_bytes,
-        0,
-    )
-    # Compute and insert CRC over packet excluding CRC field.
-    crc = crc16_ccitt(packet[:-2])
-    return packet[:-2] + struct.pack("<H", crc)
-
-
-def build_extended_packet(
+def build_firmware_packet(
     timestamp_ms: int,
     cell_voltage_mv: list[int],
     cell_temp_c: list[float],
@@ -220,18 +172,18 @@ def build_extended_packet(
 ) -> bytes:
     # Convert temperature floats to signed centi-degrees for transport.
     temps_cc = [int(round(value * 100.0)) for value in cell_temp_c]
-    # Convert amps to signed centi-amps for compact integer encoding.
-    current_ca = int(round(pack_current_a * 100.0))
+    # Match firmware: convert amps to signed deci-amps.
+    current_decia = int(round(pack_current_a * 10.0))
     # Pack structure with placeholder CRC at the end.
     packet = struct.pack(
-        EXTENDED_PACKET_FORMAT,
+        FIRMWARE_PACKET_FORMAT,
         SOF,
-        EXTENDED_PAYLOAD_LEN,
+        FIRMWARE_LENGTH_BYTE,
         timestamp_ms & 0xFFFFFFFF,
         *cell_voltage_mv,
         *temps_cc,
         pack_voltage_mv,
-        current_ca,
+        current_decia,
         *status_bytes,
         0,
     )
@@ -248,31 +200,23 @@ class BatteryTelemetrySimulator:
         self._soc = 0.88
         # Fixed per-cell offsets to emulate manufacturing mismatch.
         self._cell_offsets_mv = [-8.0, 5.0, 12.0, 3.0, -4.0, -10.0]
+        # Last emitted voltages, used to keep demo SOC moving downward.
+        self._last_cell_voltage_mv: Optional[list[int]] = None
         # Lumped thermal states for two 3-cell groups.
         self._temp_group_a = 27.0
         self._temp_group_b = 28.5
 
-    def build_packet(self, include_current: bool, timestamp_ms: Optional[int] = None) -> bytes:
+    def build_packet(self, timestamp_ms: Optional[int] = None) -> bytes:
         # Use current wall-clock time unless caller provides one.
         packet_time_ms = int(time.time() * 1000) if timestamp_ms is None else timestamp_ms
         # Generate next synthetic telemetry sample.
         sample = self._next_sample()
-        if include_current:
-            # Emit extended packet variant with current field.
-            return build_extended_packet(
-                timestamp_ms=packet_time_ms,
-                cell_voltage_mv=sample.cell_voltage_mv,
-                cell_temp_c=sample.cell_temp_c,
-                pack_voltage_mv=sample.pack_voltage_mv,
-                pack_current_a=sample.pack_current_a or 0.0,
-                status_bytes=sample.status_bytes,
-            )
-        # Emit legacy packet variant without current field.
-        return build_legacy_packet(
+        return build_firmware_packet(
             timestamp_ms=packet_time_ms,
             cell_voltage_mv=sample.cell_voltage_mv,
             cell_temp_c=sample.cell_temp_c,
             pack_voltage_mv=sample.pack_voltage_mv,
+            pack_current_a=sample.pack_current_a or 0.0,
             status_bytes=sample.status_bytes,
         )
 
@@ -304,6 +248,8 @@ class BatteryTelemetrySimulator:
             voltage_v = base_ocv_v - load_droop_v + (self._cell_offsets_mv[index] + imbalance_drift_mv + noise_mv) / 1000.0
             # Clamp to realistic bounds and quantize to mV integer.
             voltage_mv = max(2800, min(4300, int(round(voltage_v * 1000.0))))
+            if self._last_cell_voltage_mv is not None:
+                voltage_mv = min(voltage_mv, self._last_cell_voltage_mv[index])
             cell_voltage_mv.append(voltage_mv)
 
         # Drive two thermal groups toward current-dependent targets.
@@ -323,6 +269,7 @@ class BatteryTelemetrySimulator:
 
         # Pack voltage is the sum of series cell voltages.
         pack_voltage_mv = sum(cell_voltage_mv)
+        self._last_cell_voltage_mv = cell_voltage_mv.copy()
         # Build status bitfield byte 0 from simple threshold checks.
         status0 = 0
         if max(cell_voltage_mv) > 4200:
@@ -365,7 +312,6 @@ class DemoSerialReaderThread(threading.Thread):
         out_queue: queue.Queue[tuple[str, object]],
         stop_event: threading.Event,
         *,
-        include_current: bool = False,
         packet_period_s: float = DEFAULT_PACKET_PERIOD_S,
         chunk_delay_range_s: tuple[float, float] = (0.002, 0.02),
         chunk_size_range: tuple[int, int] = (1, 8),
@@ -375,8 +321,6 @@ class DemoSerialReaderThread(threading.Thread):
         self._queue = out_queue
         # Cooperative stop signal.
         self._stop_event = stop_event
-        # Select legacy vs extended packet generation.
-        self._include_current = include_current
         # Target cadence for full packets.
         self._packet_period_s = packet_period_s
         # Random delay between emitted serial chunks.
@@ -390,12 +334,11 @@ class DemoSerialReaderThread(threading.Thread):
 
     def run(self) -> None:
         # Announce simulator mode on startup.
-        mode = "extended" if self._include_current else "legacy"
-        self._queue.put(("status", f"Demo UART mode running ({mode} packets)"))
+        self._queue.put(("status", "Demo UART mode running"))
 
         while not self._stop_event.is_set():
             # Generate one full packet from simulator.
-            packet = self._simulator.build_packet(include_current=self._include_current)
+            packet = self._simulator.build_packet()
             # Track elapsed time so outer loop meets requested period.
             burst_start = time.monotonic()
             index = 0

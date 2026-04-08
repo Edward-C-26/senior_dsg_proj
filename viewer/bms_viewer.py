@@ -489,7 +489,6 @@ class BmsViewerApp:
             DemoSerialReaderThread(
                 self.data_queue,
                 stop_event,
-                include_current=False,
             ),
             stop_event,
         )
@@ -649,12 +648,8 @@ class BmsViewerApp:
         self.summary_labels["pack_voltage"].configure(text=f"{pack_voltage_v:.2f} V")
         self.summary_labels["pack_voltage_foot"].configure(text=f"STM32 timestamp {frame.timestamp_ms} ms")
 
-        if frame.pack_current_a is None:
-            self.summary_labels["pack_current"].configure(text="Awaiting")
-            self.summary_labels["pack_current_foot"].configure(text="Legacy packet without current field")
-        else:
-            self.summary_labels["pack_current"].configure(text=f"{frame.pack_current_a:.2f} A")
-            self.summary_labels["pack_current_foot"].configure(text=f"Approx. {pack_voltage_v * frame.pack_current_a:.1f} W")
+        self.summary_labels["pack_current"].configure(text=f"{frame.pack_current_a:.2f} A")
+        self.summary_labels["pack_current_foot"].configure(text=f"Approx. {pack_voltage_v * frame.pack_current_a:.1f} W")
 
         self.summary_labels["avg_cell"].configure(text=f"{frame.avg_cell_v:.3f} V")
         self.summary_labels["avg_cell_foot"].configure(text=f"Min {frame.min_cell_v:.3f} V / Max {frame.max_cell_v:.3f} V")
@@ -766,7 +761,7 @@ class BmsViewerApp:
             datetime.now().isoformat(timespec="milliseconds"),
             frame.timestamp_ms,
             frame.pack_voltage_mv,
-            "" if frame.pack_current_a is None else f"{frame.pack_current_a:.3f}",
+            f"{frame.pack_current_a:.3f}",
         ]
         row.extend(frame.status_bytes)
         row.extend(frame.cell_voltage_mv)
