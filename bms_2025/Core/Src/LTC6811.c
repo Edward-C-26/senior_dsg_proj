@@ -191,16 +191,20 @@ bool readAllCellVoltages(CellData bmsData[]) {
 		dataValid &= PEC_check[board];
 
 		// store cell number and valid data bit in bmsData
-		for (uint8_t cell = 0; cell < NUM_BOARDS; cell++) {
-			bmsData[(board * NUM_BOARDS) + cell].voltage = (uint8_t)((board * NUM_BOARDS) + cell + 1);  // cell number
+		for (uint8_t cell = 0; cell < NUM_CELLS; cell++) {
+			const uint8_t cell_index = (uint8_t)((board * 12U) + cell);
+			if (cell_index >= NUM_CELLS) {
+				break;
+			}
+			bmsData[cell_index].voltage = (uint8_t)(cell_index + 1U);  // cell number
 
 			if (!PEC_check[board]) {
-				bmsData[(board * NUM_BOARDS) + cell].fault |= CELL_PEC_FAIL_MASK;
+				bmsData[cell_index].fault |= CELL_PEC_FAIL_MASK;
             } else {
-				bmsData[(board * NUM_BOARDS) + cell].fault &= (uint8_t)(~CELL_PEC_FAIL_MASK);
+				bmsData[cell_index].fault &= (uint8_t)(~CELL_PEC_FAIL_MASK);
             }
 
-			bmsData[(board * NUM_BOARDS) + cell].voltage = boardVoltage[cell];
+			bmsData[cell_index].voltage = boardVoltage[cell];
 		}
 	}
 
@@ -286,26 +290,31 @@ bool readAllCellTemps(CellData bmsData[]) {
 		dataValid &= PEC_check[board];
 
 		// store OT and temp DC bits in status byte
-		for (uint8_t cell = 0; cell < 12; cell++) {
+		for (uint8_t cell = 0; cell < NUM_CELLS; cell++) {
+			const uint8_t cell_index = (uint8_t)((board * 12U) + cell);
+			if (cell_index >= NUM_CELLS) {
+				break;
+			}
+
 			if (!PEC_check[board]) {
-				bmsData[(board * 12) + cell].fault |= CELL_PEC_FAIL_MASK;
+				bmsData[cell_index].fault |= CELL_PEC_FAIL_MASK;
             } else {
-				bmsData[(board * 12) + cell].fault &= (uint8_t)(~CELL_PEC_FAIL_MASK);
+				bmsData[cell_index].fault &= (uint8_t)(~CELL_PEC_FAIL_MASK);
             }
 
-			if (boardTempFault[cell / 3]) {
-				bmsData[(board * 12) + cell].fault |= CELL_TEMP_FAIL_MASK;
+			if (boardTempFault[cell / 3U]) {
+				bmsData[cell_index].fault |= CELL_TEMP_FAIL_MASK;
             } else {
-				bmsData[(board * 12) + cell].fault &= (uint8_t)(~CELL_TEMP_FAIL_MASK);	// set OT bit
+				bmsData[cell_index].fault &= (uint8_t)(~CELL_TEMP_FAIL_MASK);	// set OT bit
             }
 
-			if (boardDCFault[cell / 3]) {
-				bmsData[(board * 12) + cell].fault |= CELL_DCFAULT_MASK;
+			if (boardDCFault[cell / 3U]) {
+				bmsData[cell_index].fault |= CELL_DCFAULT_MASK;
             } else {
-				bmsData[(board * 12) + cell].fault &= (uint8_t)(~CELL_DCFAULT_MASK);
+				bmsData[cell_index].fault &= (uint8_t)(~CELL_DCFAULT_MASK);
             }
 
-			bmsData[(board * 12) + cell].temperature = boardTemp[cell / 3];
+			bmsData[cell_index].temperature = boardTemp[cell / 3U];
 		}
 	}
 
@@ -439,16 +448,20 @@ bool poll_single_secondary_voltage_reading(uint8_t board_num, BMSConfigStructTyp
 	dataValid &= PEC_check[board_num];
 
 	// store cell number and valid data bit in bmsData
-	for (uint8_t cell = 0; cell < NUM_BOARDS; cell++) {
-		bmsData[(board_num * NUM_BOARDS) + cell].voltage = (uint8_t)((board_num * NUM_BOARDS) + cell + 1);  // cell number
+	for (uint8_t cell = 0; cell < cfg->numOfCellInputs; cell++) {
+		const uint8_t cell_index = (uint8_t)((board_num * 12U) + cell);
+		if (cell_index >= NUM_CELLS) {
+			break;
+		}
+		bmsData[cell_index].voltage = (uint8_t)(cell_index + 1U);  // cell number
 
 		if (!PEC_check[board_num]) {
-			bmsData[(board_num * NUM_BOARDS) + cell].fault |= CELL_PEC_FAIL_MASK;
+			bmsData[cell_index].fault |= CELL_PEC_FAIL_MASK;
 		} else {
-			bmsData[(board_num * NUM_BOARDS) + cell].fault &= (uint8_t)(~CELL_PEC_FAIL_MASK);
+			bmsData[cell_index].fault &= (uint8_t)(~CELL_PEC_FAIL_MASK);
 		}
 
-		bmsData[(board_num * NUM_BOARDS) + cell].voltage = boardVoltage[cell];
+		bmsData[cell_index].voltage = boardVoltage[cell];
 	}
 
 	return dataValid;
@@ -483,26 +496,31 @@ bool poll_single_secondary_temp_reading(uint8_t board_num, BMSConfigStructTypede
 	dataValid &= PEC_check[board_num];
 
 	// store OT and temp DC bits in status byte
-	for (uint8_t cell = 0; cell < 12; cell++) {
+	for (uint8_t cell = 0; cell < cfg->numOfCellsPerIC; cell++) {
+		const uint8_t cell_index = (uint8_t)((board_num * 12U) + cell);
+		if (cell_index >= NUM_CELLS) {
+			break;
+		}
+
 		if (!PEC_check[board_num]) {
-			bmsData[(board_num * 12) + cell].fault |= CELL_PEC_FAIL_MASK;
+			bmsData[cell_index].fault |= CELL_PEC_FAIL_MASK;
 		} else {
-			bmsData[(board_num * 12) + cell].fault &= (uint8_t)(~CELL_PEC_FAIL_MASK);
+			bmsData[cell_index].fault &= (uint8_t)(~CELL_PEC_FAIL_MASK);
 		}
 
-		if (boardTempFault[cell / 3]) {
-			bmsData[(board_num * 12) + cell].fault |= CELL_TEMP_FAIL_MASK;
+		if (boardTempFault[cell / 3U]) {
+			bmsData[cell_index].fault |= CELL_TEMP_FAIL_MASK;
 		} else {
-			bmsData[(board_num * 12) + cell].fault &= (uint8_t)(~CELL_TEMP_FAIL_MASK);	// set OT bit
+			bmsData[cell_index].fault &= (uint8_t)(~CELL_TEMP_FAIL_MASK);	// set OT bit
 		}
 
-		if (boardDCFault[cell / 3]) {
-			bmsData[(board_num * 12) + cell].fault |= CELL_DCFAULT_MASK;
+		if (boardDCFault[cell / 3U]) {
+			bmsData[cell_index].fault |= CELL_DCFAULT_MASK;
 		} else {
-			bmsData[(board_num * 12) + cell].fault &= (uint8_t)(~CELL_DCFAULT_MASK);
+			bmsData[cell_index].fault &= (uint8_t)(~CELL_DCFAULT_MASK);
 		}
 
-		bmsData[(board_num * 12) + cell].temperature = boardTemp[cell / 3];
+		bmsData[cell_index].temperature = boardTemp[cell / 3U];
 	}
 
 	return dataValid;
@@ -644,5 +662,3 @@ void sendAddressCommand(CommandCodeTypedef command, uint8_t address) {
 
 	SPIWrite(cmd, 4);
 }
-
-

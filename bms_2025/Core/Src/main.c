@@ -58,6 +58,7 @@
 #define UART_TX_PERIOD_MS            200U
 #define UART_BMS_PACKET_SOF1         0xAAU
 #define UART_BMS_PACKET_SOF2         0x55U
+#define UART_BMS_PACKET_LEN          40U
 
 /* USER CODE END PD */
 
@@ -76,7 +77,6 @@ volatile bool bmsFault = false;
 
 BMS_critical_info_t BMSCriticalInfo;
 static BMSConfigStructTypedef BMSConfig;
-UART_HandleTypeDef huart2;
 
 // Global variables for interrupt handlers and SPI communication
 SPI_HandleTypeDef* ltc_spi;
@@ -212,7 +212,7 @@ static void poll_cell_temps_once(void)
  */
 static void refresh_fault_state(void)
 {
-  // bmsFault = FAULT_check(&BMSCriticalInfo, &BMSConfig, BMS_STATUS); temporarily diable fault checking for testing without slave 
+  bmsFault = FAULT_check(&BMSCriticalInfo, &BMSConfig, BMS_STATUS);
 
   if (bmsFault) {
       HAL_GPIO_WritePin(BMS_FLT_EN_GPIO_Port, BMS_FLT_EN_Pin, GPIO_PIN_SET);
@@ -278,8 +278,7 @@ static uint16_t crc16_ccitt(const uint8_t *data, uint16_t length)
 // {
 //   uint8_t i;
 //   for (i = 0U; i < NUM_USED_CELLS; i++) {
-//     /* LTC6811 temperature is raw ADC count: 1 LSB = 0.75°C */
-//     temp_display_cC[i] = (int16_t)((bmsData[i].temperature * 75) / 100);
+//     temp_display_cC[i] = (int16_t)(bmsData[i].temperature / 10U);
 //   }
 // }
 
@@ -354,7 +353,7 @@ static void simulate_bms_data(void)
   /* Simulate cell temperatures varying */
   for (i = 0U; i < NUM_USED_CELLS; i++) {
     float cell_temp = TEMP_BASE + (TEMP_AMPLITUDE * sine_value);
-    bmsData[i].temperature = (int16_t)(cell_temp * 100.0f) / 100;  /* Store in C */
+    bmsData[i].temperature = (uint16_t)(cell_temp * 1000.0f);  /* Store in mC */
   }
   
   /* Simulate pack voltage (sum of cells) */
@@ -388,7 +387,7 @@ static void uart_send_bms_telemetry(void)
 
   packet.sof1 = UART_BMS_PACKET_SOF1;
   packet.sof2 = UART_BMS_PACKET_SOF2;
-  packet.length = 37U;
+  packet.length = UART_BMS_PACKET_LEN;
   packet.timestamp_ms = HAL_GetTick();
 
   for (i = 0U; i < NUM_USED_CELLS; i++) {
@@ -398,11 +397,11 @@ static void uart_send_bms_telemetry(void)
 
   /* Temperature array converted in-place */
   for (i = 0U; i < NUM_USED_CELLS; i++) {
-    packet.cell_temp_cC[i] = (int16_t)((bmsData[i].temperature * 75) / 100);
+    packet.cell_temp_cC[i] = (int16_t)(bmsData[i].temperature / 10U);
   }
 
-  /* Pack voltage: convert from float volts to mV */
-  packet.pack_voltage_mV = (uint16_t)(BMSCriticalInfo.isoAdcPackVoltage * 1000.0f);
+  /* Pack voltage is derived from the summed live LTC6811 cell measurements. */
+  packet.pack_voltage_mV = BMSCriticalInfo.cellMonitorPackVoltage;
   packet.pack_current_deciA = (int16_t)(BMSCriticalInfo.packCurrent * 10.0f);
 
   (void)memcpy(packet.status, BMS_STATUS, sizeof(packet.status));
@@ -437,23 +436,7 @@ static void uart_send_bms_telemetry(void)
   packet_data[41U] = (uint8_t)((packet.crc >> 0U) & 0xFFU);
   packet_data[42U] = (uint8_t)((packet.crc >> 8U) & 0xFFU);
 
-  (void)HAL_UART_Transmit(&huart2, (uint8_t *)packet_data, 43U, 100U);
-}
-
-static void MX_USART2_UART_Init(void)
-{
-    huart2.Instance = USART2;
-    huart2.Init.BaudRate = 115200;
-    huart2.Init.WordLength = UART_WORDLENGTH_8B;
-    huart2.Init.StopBits = UART_STOPBITS_1;
-    huart2.Init.Parity = UART_PARITY_NONE;
-    huart2.Init.Mode = UART_MODE_TX_RX;
-    huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-    huart2.Init.OverSampling = UART_OVERSAMPLING_16;
-
-    if (HAL_UART_Init(&huart2) != HAL_OK) {
-        Error_Handler();
-    }
+  (void)HAL_UART_Transmit(&huart1, (uint8_t *)packet_data, 43U, 100U);
 }
 
 /* USER CODE END 0 */
@@ -517,7 +500,6 @@ int main(void)
   last_temp_poll_ms = HAL_GetTick();
   last_heartbeat_ms = HAL_GetTick();
 
-  MX_USART2_UART_Init();
   last_uart_tx_ms = HAL_GetTick();
   /* USER CODE END 2 */
 
