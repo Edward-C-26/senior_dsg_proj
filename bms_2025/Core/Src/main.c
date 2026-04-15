@@ -292,15 +292,17 @@ static uint16_t crc16_ccitt(const uint8_t *data, uint16_t length)
 static float read_adc_shunt_current(void)
 {
   uint32_t adc_raw;
-  float shunt_voltage;
-  float current;
+  float shunt_voltage_v;
+  float current_ma;
+  float adc_shunt_reading_mv;
+  float adc_shunt_current_ma;
   
-  /* Start ADC conversion on channel 2 (PA2) */
+  /* Start ADC conversion on channel 1 (PA1) */
   if (HAL_ADC_Start(&hadc1) != HAL_OK) {
     return 0.0f;
   }
   
-  /* Wait for conversion to complete */
+  /* Wait for conversion to complete (with timeout) */
   if (HAL_ADC_PollForConversion(&hadc1, 100U) != HAL_OK) {
     return 0.0f;
   }
@@ -311,14 +313,22 @@ static float read_adc_shunt_current(void)
   /* Stop ADC */
   HAL_ADC_Stop(&hadc1);
   
-  /* Convert raw ADC value to voltage across shunt resistor */
+  /* Convert raw ADC value to voltage across shunt resistor (in volts) */
   /* ADC_raw: 0-4095 maps to 0-3.3V */
-  shunt_voltage = (float)adc_raw * ADC_REF_VOLTAGE / ADC_MAX_VALUE;
+  shunt_voltage_v = (float)adc_raw * ADC_REF_VOLTAGE / ADC_MAX_VALUE;
   
-  /* Calculate current from shunt resistor: I = V / R */
-  current = shunt_voltage / SHUNT_RESISTOR;
+  /* Store shunt voltage in mV for debugging/telemetry */
+  adc_shunt_reading_mv = (uint16_t)(shunt_voltage_v * 1000.0f);
   
-  return current;
+  /* Calculate current from shunt resistor using Ohm's law: I = V / R */
+  /* Result in Amps */
+  current_ma = (shunt_voltage_v / SHUNT_RESISTOR) * 1000.0f;  /* Convert to mA */
+  
+  /* Store for later use */
+  adc_shunt_current_ma = current_ma;
+  
+  /* Return in Amps for pack current (which expects deci-Amps) */
+  return current_ma / 1000.0f;
 }
 
 /**
@@ -488,8 +498,6 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_SPI1_Init();
-  MX_SPI3_Init();
-  MX_TIM2_Init();
   MX_TIM3_Init();
   MX_TIM1_Init();
   MX_TIM7_Init();
@@ -549,6 +557,9 @@ int main(void)
     }
 
     if ((now_ms - last_uart_tx_ms) >= UART_TX_PERIOD_MS) {
+      /* Read ADC1 shunt current at 200Hz (5ms period) */
+      BMSCriticalInfo.packCurrent = read_adc_shunt_current();
+      
       // simulate_bms_data();  /* Simulate varying voltage/temperature for testing */
       uart_send_bms_telemetry();
       last_uart_tx_ms = now_ms;

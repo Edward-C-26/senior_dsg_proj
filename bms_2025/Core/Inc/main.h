@@ -70,16 +70,6 @@ extern int32_t fault_timer;
 /* Private defines -----------------------------------------------------------*/
 #define BMS_FLT_EN_Pin GPIO_PIN_13
 #define BMS_FLT_EN_GPIO_Port GPIOC
-#define LSE_IN_Pin GPIO_PIN_14
-#define LSE_IN_GPIO_Port GPIOC
-#define LSE_OUT_Pin GPIO_PIN_15
-#define LSE_OUT_GPIO_Port GPIOC
-#define HSE_IN_Pin GPIO_PIN_0
-#define HSE_IN_GPIO_Port GPIOH
-#define HSE_OUT_Pin GPIO_PIN_1
-#define HSE_OUT_GPIO_Port GPIOH
-#define SHUTDOWN_ACTIVE_Pin GPIO_PIN_3
-#define SHUTDOWN_ACTIVE_GPIO_Port GPIOC
 #define SPI_UCOMM_CS_Pin GPIO_PIN_4
 #define SPI_UCOMM_CS_GPIO_Port GPIOA
 #define SPI_UCOMM_SCK_Pin GPIO_PIN_5
@@ -90,28 +80,10 @@ extern int32_t fault_timer;
 #define SPI_UCOMM_MOSI_GPIO_Port GPIOA
 #define LV_PWR_MONITOR_Pin GPIO_PIN_4
 #define LV_PWR_MONITOR_GPIO_Port GPIOC
-#define ADC_CLKIN_Pin GPIO_PIN_6
-#define ADC_CLKIN_GPIO_Port GPIOC
-#define ADC_DRDY_Pin GPIO_PIN_7
-#define ADC_DRDY_GPIO_Port GPIOC
-#define ADC_RST_Pin GPIO_PIN_8
-#define ADC_RST_GPIO_Port GPIOC
-#define CHARGE_EN_Pin GPIO_PIN_8
-#define CHARGE_EN_GPIO_Port GPIOA
 #define SWDIO_TC_Pin GPIO_PIN_13
 #define SWDIO_TC_GPIO_Port GPIOA
 #define SWCLK_TC_Pin GPIO_PIN_14
 #define SWCLK_TC_GPIO_Port GPIOA
-#define SPI_ADC_CS_Pin GPIO_PIN_15
-#define SPI_ADC_CS_GPIO_Port GPIOA
-#define SPI_ADC_SCK_Pin GPIO_PIN_10
-#define SPI_ADC_SCK_GPIO_Port GPIOC
-#define SPI_ADC_MISO_Pin GPIO_PIN_11
-#define SPI_ADC_MISO_GPIO_Port GPIOC
-#define SPI_ADC_MOSI_Pin GPIO_PIN_12
-#define SPI_ADC_MOSI_GPIO_Port GPIOC
-#define IMD_DIAGNOSTIC_Pin GPIO_PIN_3
-#define IMD_DIAGNOSTIC_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

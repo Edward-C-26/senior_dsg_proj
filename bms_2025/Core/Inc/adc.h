@@ -35,7 +35,16 @@ extern "C" {
 extern ADC_HandleTypeDef hadc1;
 
 /* USER CODE BEGIN Private defines */
+/* ADC1_IN1 (PA1) Configuration for shunt current measurement */
+#define ADC_SHUNT_CHANNEL       ADC_CHANNEL_1   /* PA1 */
+#define ADC_SHUNT_PORT          GPIOA
+#define ADC_SHUNT_PIN           GPIO_PIN_1
+#define ADC_SHUNT_SAMPLING_TIME ADC_SAMPLETIME_15CYCLES
 
+/* Shunt measurement constants */
+#define SHUNT_RESISTOR_OHMS     0.01f   /* 10 mOhm shunt resistor */
+#define ADC_REF_VOLTAGE_V       3.3f    /* 3.3V reference */
+#define ADC_MAX_VALUE_BITS      4095U   /* 12-bit ADC: 2^12 - 1 */
 /* USER CODE END Private defines */
 
 void MX_ADC1_Init(void);
