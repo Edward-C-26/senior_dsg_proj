@@ -1,6 +1,9 @@
 
 #include "LTC6811.h"
 
+#include <stddef.h>
+#include <string.h>
+
 // boards will NOT be fucked in 2025 :pray: :pray:
 #define BOARD_IS_FUCKED 0 
 
@@ -228,6 +231,9 @@ bool readCellTemp(uint8_t address, uint16_t cellTemp[4], bool dcFault[4], bool t
 //	double realTemp[4];
 
 	for (uint8_t i = 0; i < 4; i++) {
+		cellTemp[i] = 0U;
+		dcFault[i] = true;
+		tempFault[i] = false;
 		temp[i] = 0;
 //		realTemp[i] = 0.0;
 	}
@@ -248,17 +254,22 @@ bool readCellTemp(uint8_t address, uint16_t cellTemp[4], bool dcFault[4], bool t
 			double first = temp[i]/100;
 			uint16_t second = (uint16_t)round(first);
 			int index = second - 21;//convert adc to integer
-			//if (index > 203 || index < 0) {
-			//cellTemp[i] = 20*1000;
-            uint16_t lookupVal = (uint16_t)lookupTableTemps[index];
-			cellTemp[i] =  lookupVal * 1000;
+			if ((index < 0) || (index >= (int)(sizeof(lookupTableTemps) / sizeof(lookupTableTemps[0])))) {
+				cellTemp[i] = 0U;
+				dcFault[i] = true;
+				tempFault[i] = false;
+				dataValid = false;
+				continue;
+			}
 
-		
+            uint16_t lookupVal = (uint16_t)lookupTableTemps[index];
+			cellTemp[i] =  lookupVal * 1000U;
+
 			dcFault[i] = false;
-			tempFault[i] = ((lookupVal < UNDER_TEMP_LIMIT) 
+			tempFault[i] = ((lookupVal < UNDER_TEMP_LIMIT)
                     || OVER_TEMP_LIMIT < lookupVal) ? true : false;
 		
-		}
+	}
 
 		return (dataValid);
 
@@ -432,6 +443,9 @@ bool poll_single_secondary_voltage_reading(uint8_t board_num, BMSConfigStructTyp
 	bool PEC_check[12]	;
 	bool dataValid = true;
 
+	memset(boardVoltage, 0, sizeof(boardVoltage));
+	memset(PEC_check, 0, sizeof(PEC_check));
+
 	wakeup_idle();
 	writeConfigAddress(cfg, cfg->address[board_num]);
 
@@ -476,6 +490,11 @@ bool poll_single_secondary_temp_reading(uint8_t board_num, BMSConfigStructTypede
 	bool boardTempFault[4];
 	bool PEC_check[12];
 	bool dataValid = true;
+
+	memset(boardTemp, 0, sizeof(boardTemp));
+	memset(boardDCFault, 1, sizeof(boardDCFault));
+	memset(boardTempFault, 0, sizeof(boardTempFault));
+	memset(PEC_check, 0, sizeof(PEC_check));
 	//Do write config all
 	wakeup_idle();
 
@@ -539,6 +558,35 @@ bool readRegister(CommandCodeTypedef command, uint8_t address, uint16_t *data) {
 	uint8_t PEC_send[6];
 	bool dataValid = true;
 
+	memset(rx_data, 0, sizeof(rx_data));
+
+	if (data != NULL) {
+		size_t words_to_clear = 0U;
+
+		switch (command) {
+			case ReadCellVoltageRegisterGroup1to3:
+			case ReadCellVoltageRegisterGroup4to6:
+			case ReadCellVoltageRegisterGroup7to9:
+			case ReadCellVoltageRegisterGroup10to12:
+				words_to_clear = 12U;
+				break;
+			case ReadAuxiliaryGroupA:
+			case ReadAuxiliaryGroupB:
+				words_to_clear = 4U;
+				break;
+			case ReadConfigurationRegisterGroup:
+				words_to_clear = 4U;
+				break;
+			default:
+				words_to_clear = 0U;
+				break;
+		}
+
+		if (words_to_clear > 0U) {
+			memset(data, 0, words_to_clear * sizeof(*data));
+		}
+	}
+
 	PEC_send[0] = (uint8_t)(0x80 | ((address << 3) & 0x78) | ((command >> 8) & 0x07));
 	PEC_send[1] = (uint8_t)(command & 0xFF);
 
@@ -559,7 +607,9 @@ bool readRegister(CommandCodeTypedef command, uint8_t address, uint16_t *data) {
 	cmd[10] = 0;
 	cmd[11] = 0;
 
-	SPIWriteRead(cmd, rx_data, sizeof(cmd));  // send 4 command bytes, receive 6 cell voltage bytes (4-9) and 2 PEC bytes (10-11)
+	if (!SPIWriteRead(cmd, rx_data, sizeof(cmd))) {  // send 4 command bytes, receive 6 cell voltage bytes (4-9) and 2 PEC bytes (10-11)
+		return false;
+	}
 
 	// calculate PEC based on cell voltage data received
 	PEC_send[0] = rx_data[4];  // cell 1 voltage low bytes
