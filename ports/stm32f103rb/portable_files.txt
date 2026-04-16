@@ -1,0 +1,27 @@
+Copy these files from the existing project into the fresh F103 Cube project:
+
+bms_2025/Core/Src/LTC6811.c
+bms_2025/Core/Src/BMSconfig.c
+bms_2025/Core/Src/PackCalculations.c
+bms_2025/Core/Src/Fault.c
+bms_2025/Core/Src/main.c
+bms_2025/Core/Inc/LTC6811.h
+bms_2025/Core/Inc/BMSconfig.h
+bms_2025/Core/Inc/PackCalculations.h
+bms_2025/Core/Inc/Fault.h
+
+Do not copy F446-generated files such as:
+
+bms_2025/Core/Src/gpio.c
+bms_2025/Core/Src/usart.c
+bms_2025/Core/Src/adc.c
+bms_2025/Core/Src/SPI.c
+bms_2025/Core/Src/tim.c
+bms_2025/Core/Src/stm32f4xx_it.c
+bms_2025/Core/Src/stm32f4xx_hal_msp.c
+bms_2025/Core/Src/system_stm32f4xx.c
+bms_2025/Core/Startup/startup_stm32f446retx.s
+bms_2025/Core/Inc/stm32f4xx_hal_conf.h
+bms_2025/Core/Inc/stm32f4xx_it.h
+bms_2025/Drivers/STM32F4xx_HAL_Driver
+bms_2025/Drivers/CMSIS/Device/ST/STM32F4xx
