@@ -31,7 +31,7 @@ extern "C" {
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdbool.h>
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
@@ -53,14 +53,26 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-
+extern SPI_HandleTypeDef *ltc_spi;
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define BMS_FLT_EN_Pin GPIO_PIN_13
+#define BMS_FLT_EN_GPIO_Port GPIOC
 #define USART_TX_Pin GPIO_PIN_2
 #define USART_TX_GPIO_Port GPIOA
 #define USART_RX_Pin GPIO_PIN_3
 #define USART_RX_GPIO_Port GPIOA
+#define SPI_UCOMM_CS_Pin GPIO_PIN_4
+#define SPI_UCOMM_CS_GPIO_Port GPIOA
+#define SPI_UCOMM_SCK_Pin GPIO_PIN_5
+#define SPI_UCOMM_SCK_GPIO_Port GPIOA
+#define SPI_UCOMM_MISO_Pin GPIO_PIN_6
+#define SPI_UCOMM_MISO_GPIO_Port GPIOA
+#define SPI_UCOMM_MOSI_Pin GPIO_PIN_7
+#define SPI_UCOMM_MOSI_GPIO_Port GPIOA
+#define CHARGE_CURRENT_ADC_Pin GPIO_PIN_1
+#define CHARGE_CURRENT_ADC_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

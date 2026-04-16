@@ -21,7 +21,12 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <string.h>
+#include "BMSconfig.h"
+#include "Fault.h"
+#include "LTC6811.h"
+#include "PackCalculations.h"
+#include "SPI.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -31,7 +36,17 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define NUM_USED_CELLS               6U
+#define VOLTAGE_POLL_PERIOD_MS       200U
+#define TEMP_POLL_PERIOD_MS          500U
+#define HEARTBEAT_PERIOD_MS          250U
+#define UART_TX_PERIOD_MS            200U
+#define DEFAULT_BALANCE_THRESHOLD    41500U
+#define DEFAULT_MAX_DISCHARGE_CELLS  1U
+#define DEFAULT_CELL_IMBALANCE_LIMIT 150U
+#define UART_BMS_PACKET_SOF1         0x42U
+#define UART_BMS_PACKET_SOF2         0x4DU
+#define UART_BMS_PACKET_LEN          40U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -47,7 +62,24 @@ SPI_HandleTypeDef hspi1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+CellData bmsData[NUM_CELLS];
+uint8_t BMS_STATUS[6];
+bool discharge[NUM_BOARDS][12];
 
+volatile bool bmsFault = false;
+
+BMS_critical_info_t BMSCriticalInfo;
+static BMSConfigStructTypedef BMSConfig;
+SPI_HandleTypeDef *ltc_spi;
+
+static uint32_t last_voltage_poll_ms = 0U;
+static uint32_t last_temp_poll_ms = 0U;
+static uint32_t last_heartbeat_ms = 0U;
+static uint32_t last_uart_tx_ms = 0U;
+
+static const float ADC_REF_VOLTAGE = 3.3f;
+static const float ADC_MAX_VALUE = 4095.0f;
+static const float SHUNT_RESISTOR = 0.000001f;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -57,12 +89,200 @@ static void MX_USART2_UART_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
-
+static void clear_all_discharge_requests(bool discharge_matrix[NUM_BOARDS][12]);
+static void stop_all_balancing(BMSConfigStructTypedef *cfg, bool discharge_matrix[NUM_BOARDS][12]);
+static bool pack_is_safe_for_discharge(const uint8_t status[6]);
+static uint16_t get_cell_imbalance_counts(const BMS_critical_info_t *bms);
+static void poll_cell_voltages_once(void);
+static void poll_cell_temps_once(void);
+static void refresh_fault_state(void);
+static void handle_balancing(void);
+static float read_adc_shunt_current(void);
+static void uart_send_bms_telemetry(void);
+static uint16_t crc16_ccitt(const uint8_t *data, uint16_t length);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void clear_all_discharge_requests(bool discharge_matrix[NUM_BOARDS][12])
+{
+  uint8_t board;
+  uint8_t cell;
 
+  for (board = 0U; board < NUM_BOARDS; board++) {
+    for (cell = 0U; cell < 12U; cell++) {
+      discharge_matrix[board][cell] = false;
+    }
+  }
+}
+
+static void stop_all_balancing(BMSConfigStructTypedef *cfg, bool discharge_matrix[NUM_BOARDS][12])
+{
+  clear_all_discharge_requests(discharge_matrix);
+  (void)dischargeCellGroups(cfg, discharge_matrix);
+}
+
+static bool pack_is_safe_for_discharge(const uint8_t status[6])
+{
+  const bool ov = ((status[0] & 0x01U) != 0U);
+  const bool uv = ((status[0] & 0x02U) != 0U);
+  const bool ot = ((status[0] & 0x04U) != 0U);
+  const bool ut = ((status[0] & 0x08U) != 0U);
+
+  return !(ov || uv || ot || ut);
+}
+
+static uint16_t get_cell_imbalance_counts(const BMS_critical_info_t *bms)
+{
+  if (bms->curr_max_voltage < bms->curr_min_voltage) {
+    return 0U;
+  }
+
+  return (uint16_t)(bms->curr_max_voltage - bms->curr_min_voltage);
+}
+
+static void poll_cell_voltages_once(void)
+{
+  (void)poll_single_secondary_voltage_reading(0U, &BMSConfig, bmsData);
+  setCriticalVoltages(&BMSCriticalInfo, bmsData);
+}
+
+static void poll_cell_temps_once(void)
+{
+  (void)poll_single_secondary_temp_reading(0U, &BMSConfig, bmsData);
+  setCriticalTemps(&BMSCriticalInfo, bmsData);
+}
+
+static void refresh_fault_state(void)
+{
+  bmsFault = FAULT_check(&BMSCriticalInfo, &BMSConfig, BMS_STATUS);
+
+  if (bmsFault) {
+    HAL_GPIO_WritePin(BMS_FLT_EN_GPIO_Port, BMS_FLT_EN_Pin, GPIO_PIN_SET);
+  } else {
+    HAL_GPIO_WritePin(BMS_FLT_EN_GPIO_Port, BMS_FLT_EN_Pin, GPIO_PIN_RESET);
+  }
+}
+
+static void handle_balancing(void)
+{
+  const uint16_t imbalance = get_cell_imbalance_counts(&BMSCriticalInfo);
+
+  if ((!pack_is_safe_for_discharge(BMS_STATUS)) || bmsFault ||
+      (imbalance < DEFAULT_CELL_IMBALANCE_LIMIT)) {
+    stop_all_balancing(&BMSConfig, discharge);
+    return;
+  }
+
+  thresholdBalance(&BMSConfig, &BMSCriticalInfo, bmsData, discharge,
+                   DEFAULT_BALANCE_THRESHOLD, DEFAULT_MAX_DISCHARGE_CELLS);
+  (void)dischargeCellGroups(&BMSConfig, discharge);
+}
+
+static float read_adc_shunt_current(void)
+{
+  uint32_t adc_raw;
+  float shunt_voltage;
+
+  if (HAL_ADC_Start(&hadc1) != HAL_OK) {
+    return 0.0f;
+  }
+
+  if (HAL_ADC_PollForConversion(&hadc1, 100U) != HAL_OK) {
+    return 0.0f;
+  }
+
+  adc_raw = HAL_ADC_GetValue(&hadc1);
+  HAL_ADC_Stop(&hadc1);
+
+  shunt_voltage = (float)adc_raw * ADC_REF_VOLTAGE / ADC_MAX_VALUE;
+  return shunt_voltage / SHUNT_RESISTOR;
+}
+
+static uint16_t crc16_ccitt(const uint8_t *data, uint16_t length)
+{
+  uint16_t crc = 0xFFFFU;
+  uint16_t i;
+
+  for (i = 0U; i < length; i++) {
+    uint8_t j;
+    crc ^= ((uint16_t)data[i] << 8U);
+    for (j = 0U; j < 8U; j++) {
+      if ((crc & 0x8000U) != 0U) {
+        crc = (uint16_t)((crc << 1U) ^ 0x1021U);
+      } else {
+        crc = (uint16_t)(crc << 1U);
+      }
+    }
+  }
+
+  return crc;
+}
+
+static void uart_send_bms_telemetry(void)
+{
+  typedef struct __attribute__((packed)) {
+    uint8_t sof1;
+    uint8_t sof2;
+    uint8_t length;
+    uint32_t timestamp_ms;
+    uint16_t cell_voltage_mV[NUM_USED_CELLS];
+    int16_t cell_temp_cC[NUM_USED_CELLS];
+    uint16_t pack_voltage_mV;
+    int16_t pack_current_deciA;
+    uint8_t status[6];
+    uint16_t crc;
+  } BmsUartPacket_t;
+
+  BmsUartPacket_t packet;
+  uint8_t packet_data[43];
+  uint8_t i;
+
+  packet.sof1 = UART_BMS_PACKET_SOF1;
+  packet.sof2 = UART_BMS_PACKET_SOF2;
+  packet.length = UART_BMS_PACKET_LEN;
+  packet.timestamp_ms = HAL_GetTick();
+
+  for (i = 0U; i < NUM_USED_CELLS; i++) {
+    packet.cell_voltage_mV[i] = (uint16_t)((bmsData[i].voltage * 100U) / 1000U);
+    packet.cell_temp_cC[i] = (int16_t)(bmsData[i].temperature / 10U);
+  }
+
+  packet.pack_voltage_mV = BMSCriticalInfo.cellMonitorPackVoltage;
+  packet.pack_current_deciA = (int16_t)(BMSCriticalInfo.packCurrent * 10.0f);
+  (void)memcpy(packet.status, BMS_STATUS, sizeof(packet.status));
+
+  packet_data[0] = packet.sof1;
+  packet_data[1] = packet.sof2;
+  packet_data[2] = packet.length;
+  packet_data[3] = (uint8_t)((packet.timestamp_ms >> 0U) & 0xFFU);
+  packet_data[4] = (uint8_t)((packet.timestamp_ms >> 8U) & 0xFFU);
+  packet_data[5] = (uint8_t)((packet.timestamp_ms >> 16U) & 0xFFU);
+  packet_data[6] = (uint8_t)((packet.timestamp_ms >> 24U) & 0xFFU);
+
+  for (i = 0U; i < NUM_USED_CELLS; i++) {
+    packet_data[7U + (i * 2U)] = (uint8_t)((packet.cell_voltage_mV[i] >> 0U) & 0xFFU);
+    packet_data[8U + (i * 2U)] = (uint8_t)((packet.cell_voltage_mV[i] >> 8U) & 0xFFU);
+  }
+
+  for (i = 0U; i < NUM_USED_CELLS; i++) {
+    uint16_t temp_u16 = (uint16_t)(packet.cell_temp_cC[i] & 0xFFFF);
+    packet_data[19U + (i * 2U)] = (uint8_t)((temp_u16 >> 0U) & 0xFFU);
+    packet_data[20U + (i * 2U)] = (uint8_t)((temp_u16 >> 8U) & 0xFFU);
+  }
+
+  packet_data[31U] = (uint8_t)((packet.pack_voltage_mV >> 0U) & 0xFFU);
+  packet_data[32U] = (uint8_t)((packet.pack_voltage_mV >> 8U) & 0xFFU);
+  packet_data[33U] = (uint8_t)((packet.pack_current_deciA >> 0U) & 0xFFU);
+  packet_data[34U] = (uint8_t)((packet.pack_current_deciA >> 8U) & 0xFFU);
+  (void)memcpy(&packet_data[35U], packet.status, 6U);
+
+  packet.crc = crc16_ccitt(packet_data, 41U);
+  packet_data[41U] = (uint8_t)((packet.crc >> 0U) & 0xFFU);
+  packet_data[42U] = (uint8_t)((packet.crc >> 8U) & 0xFFU);
+
+  (void)HAL_UART_Transmit(&huart2, packet_data, sizeof(packet_data), 100U);
+}
 /* USER CODE END 0 */
 
 /**
@@ -98,7 +318,21 @@ int main(void)
   MX_SPI1_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
+  ltc_spi = &hspi1;
+  initPECTable();
+  loadConfig(&BMSConfig);
+  init_BMS_info(&BMSCriticalInfo);
 
+  clear_all_discharge_requests(discharge);
+  (void)memset(BMS_STATUS, 0, sizeof(BMS_STATUS));
+  (void)memset(bmsData, 0, sizeof(bmsData));
+
+  writeConfigAll(&BMSConfig);
+
+  last_voltage_poll_ms = HAL_GetTick();
+  last_temp_poll_ms = HAL_GetTick();
+  last_heartbeat_ms = HAL_GetTick();
+  last_uart_tx_ms = HAL_GetTick();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -108,6 +342,30 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    uint32_t now_ms = HAL_GetTick();
+
+    if ((now_ms - last_voltage_poll_ms) >= VOLTAGE_POLL_PERIOD_MS) {
+      poll_cell_voltages_once();
+      last_voltage_poll_ms = now_ms;
+    }
+
+    if ((now_ms - last_temp_poll_ms) >= TEMP_POLL_PERIOD_MS) {
+      poll_cell_temps_once();
+      last_temp_poll_ms = now_ms;
+    }
+
+    BMSCriticalInfo.packCurrent = read_adc_shunt_current();
+    refresh_fault_state();
+    handle_balancing();
+
+    if ((now_ms - last_heartbeat_ms) >= HEARTBEAT_PERIOD_MS) {
+      last_heartbeat_ms = now_ms;
+    }
+
+    if ((now_ms - last_uart_tx_ms) >= UART_TX_PERIOD_MS) {
+      uart_send_bms_telemetry();
+      last_uart_tx_ms = now_ms;
+    }
   }
   /* USER CODE END 3 */
 }
