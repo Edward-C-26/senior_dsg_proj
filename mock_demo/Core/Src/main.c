@@ -41,11 +41,12 @@
 #define TEMP_POLL_PERIOD_MS          500U
 #define HEARTBEAT_PERIOD_MS          250U
 #define UART_TX_PERIOD_MS            200U
+#define ENABLE_UART_SIMULATION       1U
 #define DEFAULT_BALANCE_THRESHOLD    41500U
 #define DEFAULT_MAX_DISCHARGE_CELLS  1U
 #define DEFAULT_CELL_IMBALANCE_LIMIT 150U
-#define UART_BMS_PACKET_SOF1         0x42U
-#define UART_BMS_PACKET_SOF2         0x4DU
+#define UART_BMS_PACKET_SOF1         0xAAU
+#define UART_BMS_PACKET_SOF2         0x55U
 #define UART_BMS_PACKET_LEN          40U
 /* USER CODE END PD */
 
@@ -76,10 +77,17 @@ static uint32_t last_voltage_poll_ms = 0U;
 static uint32_t last_temp_poll_ms = 0U;
 static uint32_t last_heartbeat_ms = 0U;
 static uint32_t last_uart_tx_ms = 0U;
+static uint32_t simulation_tick = 0U;
 
 static const float ADC_REF_VOLTAGE = 3.3f;
 static const float ADC_MAX_VALUE = 4095.0f;
 static const float SHUNT_RESISTOR = 0.000001f;
+static const float SIM_BASE_CELL_V = 3.92f;
+static const float SIM_SWING_CELL_V = 0.18f;
+static const float SIM_BASE_TEMP_C = 28.0f;
+static const float SIM_SWING_TEMP_C = 7.0f;
+static const float SIM_BASE_CURRENT_A = 6.0f;
+static const float SIM_SWING_CURRENT_A = 1.5f;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -95,6 +103,7 @@ static bool pack_is_safe_for_discharge(const uint8_t status[6]);
 static uint16_t get_cell_imbalance_counts(const BMS_critical_info_t *bms);
 static void poll_cell_voltages_once(void);
 static void poll_cell_temps_once(void);
+static void simulate_bms_data(void);
 static void refresh_fault_state(void);
 static void handle_balancing(void);
 static float read_adc_shunt_current(void);
@@ -151,6 +160,75 @@ static void poll_cell_temps_once(void)
 {
   (void)poll_single_secondary_temp_reading(0U, &BMSConfig, bmsData);
   setCriticalTemps(&BMSCriticalInfo, bmsData);
+}
+
+static void simulate_bms_data(void)
+{
+  uint8_t i;
+  float triangle_phase;
+  float triangle_wave;
+  float current_a;
+  uint32_t total_pack_mV = 0U;
+
+  triangle_phase = (float)(simulation_tick % 60U) / 60.0f;
+  if (triangle_phase < 0.5f) {
+    triangle_wave = (4.0f * triangle_phase) - 1.0f;
+  } else {
+    triangle_wave = 3.0f - (4.0f * triangle_phase);
+  }
+
+  current_a = SIM_BASE_CURRENT_A + (SIM_SWING_CURRENT_A * triangle_wave);
+  if (current_a < 0.0f) {
+    current_a = 0.0f;
+  }
+
+  for (i = 0U; i < NUM_USED_CELLS; i++) {
+    float cell_offset_v = ((float)i - 2.5f) * 0.008f;
+    float drift_v = (i == 2U) ? ((float)(simulation_tick % 80U) * 0.0008f) : 0.0f;
+    float cell_voltage_v = SIM_BASE_CELL_V + (SIM_SWING_CELL_V * triangle_wave) + cell_offset_v + drift_v;
+    float cell_temp_c = SIM_BASE_TEMP_C + (SIM_SWING_TEMP_C * triangle_wave) + ((i < 3U) ? 0.5f : 2.0f);
+    uint16_t cell_voltage_counts;
+    uint16_t cell_temp_mC;
+
+    if (cell_voltage_v < 3.0f) {
+      cell_voltage_v = 3.0f;
+    }
+    if (cell_voltage_v > 4.2f) {
+      cell_voltage_v = 4.2f;
+    }
+    if (cell_temp_c < 10.0f) {
+      cell_temp_c = 10.0f;
+    }
+    if (cell_temp_c > 62.0f) {
+      cell_temp_c = 62.0f;
+    }
+
+    cell_voltage_counts = (uint16_t)(cell_voltage_v * 10000.0f);
+    cell_temp_mC = (uint16_t)(cell_temp_c * 1000.0f);
+
+    bmsData[i].voltage = cell_voltage_counts;
+    bmsData[i].temperature = cell_temp_mC;
+    total_pack_mV += (uint32_t)(cell_voltage_counts / 10U);
+  }
+
+  setCriticalVoltages(&BMSCriticalInfo, bmsData);
+  setCriticalTemps(&BMSCriticalInfo, bmsData);
+  BMSCriticalInfo.packCurrent = current_a;
+  BMSCriticalInfo.cellMonitorPackVoltage = (uint16_t)total_pack_mV;
+
+  (void)memset(BMS_STATUS, 0, sizeof(BMS_STATUS));
+  if (BMSCriticalInfo.curr_max_voltage > BMSConfig.OV_threshold) {
+    BMS_STATUS[0] |= 0x01U;
+  }
+  if (BMSCriticalInfo.curr_min_voltage < BMSConfig.UV_threshold) {
+    BMS_STATUS[0] |= 0x02U;
+  }
+  if (BMSCriticalInfo.curr_max_temp > BMSConfig.OT_threshold) {
+    BMS_STATUS[0] |= 0x04U;
+  }
+  if (BMSCriticalInfo.curr_min_temp < BMSConfig.UT_threshold) {
+    BMS_STATUS[0] |= 0x08U;
+  }
 }
 
 static void refresh_fault_state(void)
@@ -327,7 +405,9 @@ int main(void)
   (void)memset(BMS_STATUS, 0, sizeof(BMS_STATUS));
   (void)memset(bmsData, 0, sizeof(bmsData));
 
+#if !ENABLE_UART_SIMULATION
   writeConfigAll(&BMSConfig);
+#endif
 
   last_voltage_poll_ms = HAL_GetTick();
   last_temp_poll_ms = HAL_GetTick();
@@ -344,6 +424,9 @@ int main(void)
     /* USER CODE BEGIN 3 */
     uint32_t now_ms = HAL_GetTick();
 
+#if ENABLE_UART_SIMULATION
+    simulate_bms_data();
+#else
     if ((now_ms - last_voltage_poll_ms) >= VOLTAGE_POLL_PERIOD_MS) {
       poll_cell_voltages_once();
       last_voltage_poll_ms = now_ms;
@@ -357,6 +440,7 @@ int main(void)
     BMSCriticalInfo.packCurrent = read_adc_shunt_current();
     refresh_fault_state();
     handle_balancing();
+#endif
 
     if ((now_ms - last_heartbeat_ms) >= HEARTBEAT_PERIOD_MS) {
       last_heartbeat_ms = now_ms;
@@ -366,6 +450,8 @@ int main(void)
       uart_send_bms_telemetry();
       last_uart_tx_ms = now_ms;
     }
+
+    simulation_tick++;
   }
   /* USER CODE END 3 */
 }
