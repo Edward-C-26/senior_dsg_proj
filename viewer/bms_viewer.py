@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import glob
 import os
 import queue
 import threading
@@ -463,12 +464,22 @@ class BmsViewerApp:
         self.trends_button.configure(text="Open Trends")
 
     def refresh_ports(self) -> None:
-        ports = []
+        ports: list[str] = []
         if list_ports is not None:
             ports = [port.device for port in list_ports.comports()]
+
+        # macOS can expose USB CDC devices under /dev/cu.* and /dev/tty.*
+        # even when pyserial's enumerator does not return them. Prefer the
+        # callout device for outbound connections from the viewer.
+        if os.name == "posix":
+            ports.extend(sorted(glob.glob("/dev/cu.*")))
+            ports.extend(sorted(glob.glob("/dev/tty.*")))
+
+        ports = list(dict.fromkeys(ports))
         self.port_box["values"] = ports
         if ports:
-            self.port_var.set(ports[0])
+            preferred_port = next((port for port in ports if "/dev/cu." in port), ports[0])
+            self.port_var.set(preferred_port)
         else:
             self.port_var.set("")
 
