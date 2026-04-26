@@ -56,6 +56,7 @@
 #define DEFAULT_CELL_IMBALANCE_LIMIT 150U
 
 #define UART_TX_PERIOD_MS            200U
+#define ENABLE_UART_SIMULATION       1U
 #define UART_BMS_PACKET_SOF1         0xAAU
 #define UART_BMS_PACKET_SOF2         0x55U
 #define UART_BMS_PACKET_LEN          40U
@@ -373,8 +374,8 @@ static void uart_send_bms_telemetry(void)
     uint8_t sof2;
     uint8_t length;
     uint32_t timestamp_ms;
-    uint16_t cell_voltage_mV[6];
-    int16_t cell_temp_cC[6];
+    uint16_t cell_voltage_mV[NUM_USED_CELLS];
+    int16_t cell_temp_cC[NUM_USED_CELLS];
     uint16_t pack_voltage_mV;
     int16_t pack_current_deciA;
     uint8_t status[6];
@@ -391,19 +392,12 @@ static void uart_send_bms_telemetry(void)
   packet.timestamp_ms = HAL_GetTick();
 
   for (i = 0U; i < NUM_USED_CELLS; i++) {
-    /* LTC6811 voltage: 1 LSB = 100uV = 0.0001V, convert to mV */
     packet.cell_voltage_mV[i] = (uint16_t)((bmsData[i].voltage * 100U) / 1000U);
-  }
-
-  /* Temperature array converted in-place */
-  for (i = 0U; i < NUM_USED_CELLS; i++) {
     packet.cell_temp_cC[i] = (int16_t)(bmsData[i].temperature / 10U);
   }
 
-  /* Pack voltage is derived from the summed live LTC6811 cell measurements. */
   packet.pack_voltage_mV = BMSCriticalInfo.cellMonitorPackVoltage;
   packet.pack_current_deciA = (int16_t)(BMSCriticalInfo.packCurrent * 10.0f);
-
   (void)memcpy(packet.status, BMS_STATUS, sizeof(packet.status));
 
   packet_data[0] = packet.sof1;
@@ -427,16 +421,20 @@ static void uart_send_bms_telemetry(void)
 
   packet_data[31U] = (uint8_t)((packet.pack_voltage_mV >> 0U) & 0xFFU);
   packet_data[32U] = (uint8_t)((packet.pack_voltage_mV >> 8U) & 0xFFU);
-  packet_data[33U] = (uint8_t)((packet.pack_current_deciA >> 0U) & 0x00FF);
-  packet_data[34U] = (uint8_t)((packet.pack_current_deciA >> 8U) & 0x00FF);
-
+  packet_data[33U] = (uint8_t)((packet.pack_current_deciA >> 0U) & 0xFFU);
+  packet_data[34U] = (uint8_t)((packet.pack_current_deciA >> 8U) & 0xFFU);
   (void)memcpy(&packet_data[35U], packet.status, 6U);
 
   packet.crc = crc16_ccitt(packet_data, 41U);
   packet_data[41U] = (uint8_t)((packet.crc >> 0U) & 0xFFU);
   packet_data[42U] = (uint8_t)((packet.crc >> 8U) & 0xFFU);
 
-  (void)HAL_UART_Transmit(&huart1, (uint8_t *)packet_data, 43U, 100U);
+  // (void)HAL_UART_Transmit(&huart2, packet_data, sizeof(packet_data), 100U);
+
+  char message[] = "Hello\r\n";
+  (void)HAL_UART_Transmit(&huart2, (uint8_t*)message, strlen(message), 1000);
+
+
 }
 
 /* USER CODE END 0 */
@@ -477,7 +475,7 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM7_Init();
   MX_TIM13_Init();
-  MX_USART1_UART_Init();
+  MX_USART2_UART_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
   // Initialize ltc_spi to point to appropriate SPI handle (SPI1 is used for LTC6811)
