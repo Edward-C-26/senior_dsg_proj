@@ -397,6 +397,7 @@ static void uart_send_bms_telemetry(void)
   }
 
   packet.pack_voltage_mV = BMSCriticalInfo.cellMonitorPackVoltage;
+  BMSCriticalInfo.packCurrent = read_adc_shunt_current();
   packet.pack_current_deciA = (int16_t)(BMSCriticalInfo.packCurrent * 10.0f);
   (void)memcpy(packet.status, BMS_STATUS, sizeof(packet.status));
 
