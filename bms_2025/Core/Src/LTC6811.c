@@ -560,33 +560,33 @@ bool readRegister(CommandCodeTypedef command, uint8_t address, uint16_t *data) {
 
 	memset(rx_data, 0, sizeof(rx_data));
 
-	if (data != NULL) {
-		size_t words_to_clear = 0U;
-
-		switch (command) {
-			case ReadCellVoltageRegisterGroup1to3:
-			case ReadCellVoltageRegisterGroup4to6:
-			case ReadCellVoltageRegisterGroup7to9:
-			case ReadCellVoltageRegisterGroup10to12:
-				words_to_clear = 12U;
-				break;
-			case ReadAuxiliaryGroupA:
-			case ReadAuxiliaryGroupB:
-				words_to_clear = 4U;
-				break;
-			case ReadConfigurationRegisterGroup:
-				words_to_clear = 4U;
-				break;
-			default:
-				words_to_clear = 0U;
-				break;
-		}
-
-		if (words_to_clear > 0U) {
-			memset(data, 0, words_to_clear * sizeof(*data));
-		}
-	}
-
+//	if (data != NULL) {
+//		size_t words_to_clear = 0U;
+//
+//		switch (command) {
+//			case ReadCellVoltageRegisterGroup1to3:
+//			case ReadCellVoltageRegisterGroup4to6:
+//			case ReadCellVoltageRegisterGroup7to9:
+//			case ReadCellVoltageRegisterGroup10to12:
+//				words_to_clear = 12U;
+//				break;
+//			case ReadAuxiliaryGroupA:
+//			case ReadAuxiliaryGroupB:
+//				words_to_clear = 4U;
+//				break;
+//			case ReadConfigurationRegisterGroup:
+//				words_to_clear = 4U;
+//				break;
+//			default:
+//				words_to_clear = 0U;
+//				break;
+//		}
+//
+//		if (words_to_clear > 0U) {
+//			memset(data, 0, words_to_clear * sizeof(*data));
+//		}
+//	}
+//
 	PEC_send[0] = (uint8_t)(0x80 | ((address << 3) & 0x78) | ((command >> 8) & 0x07));
 	PEC_send[1] = (uint8_t)(command & 0xFF);
 

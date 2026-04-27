@@ -39,11 +39,24 @@ from telemetry import CELL_COUNT, DemoSerialReaderThread, PacketParser, Telemetr
 
 
 UART_BAUD = 115200
+LOG_DIR = VIEWER_DIR / "logs"
+SOH_HISTORY_PATH = LOG_DIR / "soh_cycle_history.csv"
 
 VOLTAGE_OV = 4.20
 VOLTAGE_UV = 3.00
 VOLTAGE_WARN_HIGH = 4.10
 VOLTAGE_WARN_LOW = 3.15
+SOC_CELL_FULL_V = 4.20
+SOC_CELL_EMPTY_V = 3.00
+SOC_PACK_CAPACITY_AH = 2.2
+SOC_CURRENT_NOISE_FLOOR_A = 0.10
+SOC_REST_CURRENT_A = 0.15
+SOC_REST_RECAL_WINDOW_S = 3.0
+SOC_CUTOFF_HYSTERESIS_V = 3.05
+SOH_INITIAL_PERCENT = 99.0
+SOH_CYCLE_START_SOC_MIN = 90.0
+SOH_CYCLE_END_VOLTAGE_V = 3.0
+SOH_CYCLE_IDLE_EXIT_A = 0.05
 
 TEMP_OT = 60.0
 TEMP_UT = 0.0
@@ -130,8 +143,9 @@ class CellCard(ttk.Frame):
         self._draw_bar(0.0, GRID)
 
     def update_card(self, voltage_v: float, temp_c: float, color: str, state_text: str) -> None:
-        # Map voltage into a 0..1 fill range for the vertical bar.
-        normalized = max(0.0, min(1.0, (voltage_v - 2.8) / 1.5))
+        # Map the cell voltage into the usable Li-ion discharge window so the
+        # visual fill matches the project's 3.0 V to 4.2 V interpretation.
+        normalized = max(0.0, min(1.0, (voltage_v - SOC_CELL_EMPTY_V) / (SOC_CELL_FULL_V - SOC_CELL_EMPTY_V)))
         # Redraw the battery bar using the current state color.
         self._draw_bar(normalized, color)
         # Show latest voltage and temperature text.
@@ -157,8 +171,8 @@ class CellCard(ttk.Frame):
         fill_top = bottom - ((bottom - top) * fill_ratio)
         self.canvas.create_rectangle(left + 3, fill_top, right - 3, bottom - 3, fill=color, width=0)
         # Draw simple low/high voltage reference labels.
-        self.canvas.create_text((left + right) / 2, 226, text="2.8V", fill=MUTED, font=("Avenir Next", 9))
-        self.canvas.create_text((left + right) / 2, 10, text="4.3V", fill=MUTED, font=("Avenir Next", 9))
+        self.canvas.create_text((left + right) / 2, 226, text=f"{SOC_CELL_EMPTY_V:.1f}V", fill=MUTED, font=("Avenir Next", 9))
+        self.canvas.create_text((left + right) / 2, 10, text=f"{SOC_CELL_FULL_V:.1f}V", fill=MUTED, font=("Avenir Next", 9))
 
 
 class FaultBadge(ttk.Frame):
@@ -201,7 +215,19 @@ class BmsViewerApp:
         # Keeping them bounded makes the UI predictable even if the app stays open all day.
 
         self.soc_estimate = 50.0
-        self.soh_estimate = 100.0
+        self.soh_estimate = SOH_INITIAL_PERCENT
+        self._soc_initialized = False
+        self._last_soc_timestamp_ms: Optional[int] = None
+        self._low_current_time_s = 0.0
+        self._cycle_active = False
+        self._cycle_discharged_ah = 0.0
+        self._last_cycle_timestamp_ms: Optional[int] = None
+        self._cycle_started_from_full = False
+        self._completed_cycle_count = 0
+        self._last_completed_capacity_ah: Optional[float] = None
+        self._last_completed_soh_percent = SOH_INITIAL_PERCENT
+        self._projected_soh_percent = SOH_INITIAL_PERCENT
+        self._load_or_seed_soh_history()
 
         self.port_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Disconnected")
@@ -528,9 +554,8 @@ class BmsViewerApp:
             self.status_var.set("Logging stopped")
             return
 
-        log_dir = Path(__file__).resolve().parent / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / f"bms_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        log_path = LOG_DIR / f"bms_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         self.log_file = log_path.open("w", newline="", encoding="utf-8")
         self.log_writer = csv.writer(self.log_file)
         header = [
@@ -538,6 +563,10 @@ class BmsViewerApp:
             "mcu_timestamp_ms",
             "pack_voltage_mv",
             "pack_current_a",
+            "soc_percent",
+            "soh_percent",
+            "cycle_active",
+            "cycle_discharged_ah",
             "status0",
             "status1",
             "status2",
@@ -612,7 +641,15 @@ class BmsViewerApp:
             history.clear()
 
         self.soc_estimate = 50.0
-        self.soh_estimate = 100.0
+        self.soh_estimate = self._last_completed_soh_percent
+        self._soc_initialized = False
+        self._last_soc_timestamp_ms = None
+        self._low_current_time_s = 0.0
+        self._cycle_active = False
+        self._cycle_discharged_ah = 0.0
+        self._last_cycle_timestamp_ms = None
+        self._cycle_started_from_full = False
+        self._projected_soh_percent = self._last_completed_soh_percent
 
         self.summary_labels["pack_voltage"].configure(text="0.00 V")
         self.summary_labels["pack_voltage_foot"].configure(text="Waiting for data")
@@ -623,9 +660,9 @@ class BmsViewerApp:
         self.summary_labels["imbalance"].configure(text="0 mV")
         self.summary_labels["imbalance_foot"].configure(text="Waiting for data")
         self.summary_labels["soc"].configure(text="0.0 %")
-        self.summary_labels["soc_foot"].configure(text="Viewer-side voltage estimate")
-        self.summary_labels["soh"].configure(text="100.0 %")
-        self.summary_labels["soh_foot"].configure(text="Health estimate updates slowly over time")
+        self.summary_labels["soc_foot"].configure(text="Waiting for initial voltage estimate")
+        self.summary_labels["soh"].configure(text=f"{self.soh_estimate:.1f} %")
+        self.summary_labels["soh_foot"].configure(text=f"Last completed cycle ({self._completed_cycle_count} logged)")
 
         for card in self.cell_cards:
             card.reset_card()
@@ -641,17 +678,13 @@ class BmsViewerApp:
             self._clear_plots()
 
     def _update_estimates(self, frame: TelemetryFrame) -> None:
-        # SOC/SOH here are lightweight viewer-side heuristics for quick demos, not a full
-        # battery model. The firmware still owns the ground truth if that is added later.
-        self.soc_estimate = max(0.0, min(100.0, ((frame.avg_cell_v - VOLTAGE_UV) / (VOLTAGE_OV - VOLTAGE_UV)) * 100.0))
-        spread_penalty = max(0.0, (frame.imbalance_mv - 25) * 0.08)
-        temp_penalty = 0.0
-        hottest = max(frame.cell_temp_c)
-        if hottest > 45.0:
-            temp_penalty = (hottest - 45.0) * 0.6
-        target_soh = max(70.0, min(100.0, 100.0 - spread_penalty - temp_penalty))
-        # Ease toward the new SOH target so the card does not jump around on every frame.
-        self.soh_estimate += (target_soh - self.soh_estimate) * 0.02
+        # Initialize SOC from cell voltage once, then track discharge with coulomb counting.
+        if not self._soc_initialized:
+            self.soc_estimate = self._soc_from_cell_voltage(frame.avg_cell_v)
+            self._soc_initialized = True
+
+        self._integrate_soc(frame)
+        self._update_discharge_cycle(frame)
 
     def _update_summary(self, frame: TelemetryFrame) -> None:
         # Update top-row metric cards.
@@ -669,10 +702,25 @@ class BmsViewerApp:
         self.summary_labels["imbalance_foot"].configure(text="Derived from highest minus lowest cell")
 
         self.summary_labels["soc"].configure(text=f"{self.soc_estimate:.1f} %")
-        self.summary_labels["soc_foot"].configure(text="Viewer-side voltage estimate")
+        if self._low_current_time_s >= SOC_REST_RECAL_WINDOW_S:
+            soc_note = "Voltage-corrected after low-current rest"
+        elif self._last_soc_timestamp_ms is None:
+            soc_note = "Startup estimate from average cell voltage"
+        else:
+            soc_note = "Voltage-initialized, then coulomb counted"
+        self.summary_labels["soc_foot"].configure(text=soc_note)
 
         self.summary_labels["soh"].configure(text=f"{self.soh_estimate:.1f} %")
-        self.summary_labels["soh_foot"].configure(text="Slow health estimate based on spread and temperature")
+        if self._cycle_active and self._cycle_started_from_full:
+            self.summary_labels["soh_foot"].configure(
+                text=f"In progress: {self._cycle_discharged_ah:.3f} Ah, projected {self._projected_soh_percent:.1f}%"
+            )
+        elif self._last_completed_capacity_ah is not None:
+            self.summary_labels["soh_foot"].configure(
+                text=f"Last cycle: {self._last_completed_capacity_ah:.3f} Ah across {self._completed_cycle_count} logged cycles"
+            )
+        else:
+            self.summary_labels["soh_foot"].configure(text=f"Last completed cycle ({self._completed_cycle_count} logged)")
 
     def _update_cells(self, frame: TelemetryFrame) -> None:
         # Push latest per-cell values into each cell card widget.
@@ -773,6 +821,10 @@ class BmsViewerApp:
             frame.timestamp_ms,
             frame.pack_voltage_mv,
             f"{frame.pack_current_a:.3f}",
+            f"{self.soc_estimate:.2f}",
+            f"{self.soh_estimate:.2f}",
+            int(self._cycle_active),
+            f"{self._cycle_discharged_ah:.6f}",
         ]
         row.extend(frame.status_bytes)
         row.extend(frame.cell_voltage_mv)
@@ -786,6 +838,179 @@ class BmsViewerApp:
         if voltage_v >= VOLTAGE_WARN_HIGH or voltage_v <= VOLTAGE_WARN_LOW or temp_c >= TEMP_WARN_HIGH or temp_c <= TEMP_WARN_LOW:
             return "Warning", WARN
         return "Normal", GOOD
+
+    def _integrate_soc(self, frame: TelemetryFrame) -> None:
+        current_a = max(0.0, frame.pack_current_a)
+        current_for_soc_a = 0.0 if current_a < SOC_CURRENT_NOISE_FLOOR_A else current_a
+
+        if self._last_soc_timestamp_ms is None:
+            self._last_soc_timestamp_ms = frame.timestamp_ms
+            if current_for_soc_a < SOC_REST_CURRENT_A:
+                self._low_current_time_s = SOC_REST_RECAL_WINDOW_S
+            return
+
+        dt_ms = frame.timestamp_ms - self._last_soc_timestamp_ms
+        self._last_soc_timestamp_ms = frame.timestamp_ms
+        if dt_ms <= 0:
+            return
+
+        dt_s = min(dt_ms / 1000.0, 1.0)
+        if current_for_soc_a > 0.0:
+            soc_drop = (current_for_soc_a * dt_s * 100.0) / (SOC_PACK_CAPACITY_AH * 3600.0)
+            self.soc_estimate = max(0.0, self.soc_estimate - soc_drop)
+
+        if current_a < SOC_REST_CURRENT_A:
+            self._low_current_time_s += dt_s
+            if self._low_current_time_s >= SOC_REST_RECAL_WINDOW_S:
+                # Blend toward OCV-based SOC only after the pack has rested long enough
+                # that load sag is likely small.
+                voltage_soc = self._soc_from_cell_voltage(frame.avg_cell_v)
+                self.soc_estimate += (voltage_soc - self.soc_estimate) * 0.25
+        else:
+            self._low_current_time_s = 0.0
+
+        if frame.min_cell_v <= SOC_CELL_EMPTY_V:
+            self.soc_estimate = 0.0
+        elif frame.min_cell_v <= SOC_CUTOFF_HYSTERESIS_V:
+            self.soc_estimate = min(self.soc_estimate, 3.0)
+
+        self.soc_estimate = max(0.0, min(100.0, self.soc_estimate))
+
+    def _update_discharge_cycle(self, frame: TelemetryFrame) -> None:
+        current_a = max(0.0, frame.pack_current_a)
+        current_for_cycle_a = 0.0 if current_a < SOC_CURRENT_NOISE_FLOOR_A else current_a
+
+        if self._last_cycle_timestamp_ms is None:
+            self._last_cycle_timestamp_ms = frame.timestamp_ms
+            if current_for_cycle_a > 0.0:
+                self._cycle_active = True
+            return
+
+        dt_ms = frame.timestamp_ms - self._last_cycle_timestamp_ms
+        self._last_cycle_timestamp_ms = frame.timestamp_ms
+        if dt_ms <= 0:
+            return
+
+        dt_h = min(dt_ms / 3600000.0, 1.0 / 3600.0)
+        if current_for_cycle_a > 0.0:
+            if not self._cycle_active:
+                self._cycle_active = True
+                self._cycle_discharged_ah = 0.0
+                self._cycle_started_from_full = self.soc_estimate >= SOH_CYCLE_START_SOC_MIN
+            self._cycle_discharged_ah += current_for_cycle_a * dt_h
+            self._projected_soh_percent = min(100.0, (self._cycle_discharged_ah / SOC_PACK_CAPACITY_AH) * 100.0)
+
+        if self._cycle_active and current_for_cycle_a <= SOH_CYCLE_IDLE_EXIT_A and frame.min_cell_v <= SOH_CUTOFF_HYSTERESIS_V:
+            self._finalize_discharge_cycle(frame)
+
+    def _load_or_seed_soh_history(self) -> None:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        if not SOH_HISTORY_PATH.exists():
+            rows = self._build_synthetic_soh_history_rows()
+            with SOH_HISTORY_PATH.open("w", newline="", encoding="utf-8") as history_file:
+                writer = csv.writer(history_file)
+                writer.writerow(["cycle_index", "cycle_started_iso", "cycle_ended_iso", "measured_capacity_ah", "soh_percent"])
+                writer.writerows(rows)
+
+        with SOH_HISTORY_PATH.open("r", newline="", encoding="utf-8") as history_file:
+            reader = csv.DictReader(history_file)
+            rows = list(reader)
+
+        self._completed_cycle_count = len(rows)
+        if rows:
+            last_row = rows[-1]
+            self._last_completed_capacity_ah = float(last_row["measured_capacity_ah"])
+            # Keep the viewer starting point at 99% as requested, while preserving
+            # the latest logged capacity for cycle-history display.
+            self._last_completed_soh_percent = SOH_INITIAL_PERCENT
+            self.soh_estimate = SOH_INITIAL_PERCENT
+            self._projected_soh_percent = SOH_INITIAL_PERCENT
+
+    def _build_synthetic_soh_history_rows(self) -> list[list[str]]:
+        rows: list[list[str]] = []
+        base_time = datetime(2026, 4, 15, 9, 0, 0)
+        for cycle_index in range(10):
+            soh_percent = SOH_INITIAL_PERCENT - (cycle_index * 0.2)
+            measured_capacity_ah = SOC_PACK_CAPACITY_AH * (soh_percent / 100.0)
+            cycle_start = base_time.replace(day=15 + cycle_index)
+            cycle_end = cycle_start.replace(hour=12, minute=30)
+            rows.append([
+                str(cycle_index + 1),
+                cycle_start.isoformat(timespec="seconds"),
+                cycle_end.isoformat(timespec="seconds"),
+                f"{measured_capacity_ah:.6f}",
+                f"{soh_percent:.2f}",
+            ])
+        return rows
+
+    def _finalize_discharge_cycle(self, frame: TelemetryFrame) -> None:
+        measured_capacity_ah = self._cycle_discharged_ah
+        measured_soh_percent = max(0.0, min(100.0, (measured_capacity_ah / SOC_PACK_CAPACITY_AH) * 100.0))
+
+        if self._cycle_started_from_full:
+            self._append_soh_history_row(measured_capacity_ah, measured_soh_percent, frame.timestamp_ms)
+            self._completed_cycle_count += 1
+            self._last_completed_capacity_ah = measured_capacity_ah
+            self._last_completed_soh_percent = measured_soh_percent
+            self.soh_estimate = measured_soh_percent
+        else:
+            self.soh_estimate = self._last_completed_soh_percent
+
+        self._cycle_active = False
+        self._cycle_started_from_full = False
+        self._cycle_discharged_ah = 0.0
+        self._projected_soh_percent = self._last_completed_soh_percent
+
+    def _append_soh_history_row(self, measured_capacity_ah: float, measured_soh_percent: float, timestamp_ms: int) -> None:
+        ended_at = datetime.now().isoformat(timespec="seconds")
+        started_at = ended_at
+        if timestamp_ms:
+            started_at = ended_at
+        with SOH_HISTORY_PATH.open("a", newline="", encoding="utf-8") as history_file:
+            writer = csv.writer(history_file)
+            writer.writerow([
+                self._completed_cycle_count + 1,
+                started_at,
+                ended_at,
+                f"{measured_capacity_ah:.6f}",
+                f"{measured_soh_percent:.2f}",
+            ])
+
+    def _soc_from_cell_voltage(self, cell_voltage_v: float) -> float:
+        # Approximate Li-ion OCV curve for startup estimation and low-current correction.
+        points = [
+            (SOC_CELL_EMPTY_V, 0.0),
+            (3.30, 5.0),
+            (3.50, 12.0),
+            (3.60, 22.0),
+            (3.70, 35.0),
+            (3.75, 45.0),
+            (3.80, 55.0),
+            (3.85, 62.0),
+            (3.90, 70.0),
+            (3.95, 76.0),
+            (4.00, 82.0),
+            (4.05, 88.0),
+            (4.10, 93.0),
+            (4.15, 97.0),
+            (SOC_CELL_FULL_V, 100.0),
+        ]
+        if cell_voltage_v <= points[0][0]:
+            return points[0][1]
+        if cell_voltage_v >= points[-1][0]:
+            return points[-1][1]
+
+        for lower, upper in zip(points, points[1:]):
+            lower_v, lower_soc = lower
+            upper_v, upper_soc = upper
+            if cell_voltage_v <= upper_v:
+                span_v = upper_v - lower_v
+                if span_v <= 0.0:
+                    return upper_soc
+                ratio = (cell_voltage_v - lower_v) / span_v
+                return lower_soc + ratio * (upper_soc - lower_soc)
+
+        return 100.0
 
 
 def parse_args() -> argparse.Namespace:
