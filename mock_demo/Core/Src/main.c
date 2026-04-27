@@ -359,7 +359,10 @@ static void uart_send_bms_telemetry(void)
   packet_data[41U] = (uint8_t)((packet.crc >> 0U) & 0xFFU);
   packet_data[42U] = (uint8_t)((packet.crc >> 8U) & 0xFFU);
 
-  (void)HAL_UART_Transmit(&huart2, packet_data, sizeof(packet_data), 100U);
+//  (void)HAL_UART_Transmit(&huart2, packet_data, sizeof(packet_data), 100U);
+
+  char message[] = "Nucleo1 comm\r\n";
+  (void)HAL_UART_Transmit(&huart2, (uint8_t*)message, strlen(message), 1000);
 }
 /* USER CODE END 0 */
 
