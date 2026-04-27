@@ -81,7 +81,6 @@ static BMSConfigStructTypedef BMSConfig;
 
 // Global variables for interrupt handlers and SPI communication
 SPI_HandleTypeDef* ltc_spi;
-SPI_HandleTypeDef* adc_spi;
 int16_t poll_cell_voltages = 0;
 int16_t poll_cell_temps = 0;
 int32_t fault_timer = 0;
@@ -101,7 +100,7 @@ static const float TEMP_AMPLITUDE = 10.0f; /* Varies by +/-10C */
 /* ADC configuration for INA shunt current measurement */
 static const float ADC_REF_VOLTAGE = 3.3f;  /* ADC reference voltage (3.3V) */
 static const float ADC_MAX_VALUE = 4095.0f; /* 12-bit ADC max value */
-static const float SHUNT_RESISTOR = 0.000001f;  /* Shunt resistor value in ohms */
+static const float SHUNT_RESISTOR = 0.001f;  /* Shunt resistor value in ohms (1 mΩ) */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -116,7 +115,6 @@ static void simulate_bms_data(void);
 static void poll_cell_temps_once(void);
 static void refresh_fault_state(void);
 static void handle_balancing(void);
-static void heartbeat_task(void);
 static float read_adc_shunt_current(void);
 
 /* USER CODE END PFP */
@@ -284,9 +282,9 @@ static uint16_t crc16_ccitt(const uint8_t *data, uint16_t length)
 // }
 
 /**
-  * @brief Read ADC1_IN2 (PA2) INA shunt resistor voltage and convert to current
+  * @brief Read ADC1_IN11 (PC1) INA output voltage and convert to current
   * @return Current in Amperes
-  * 
+  *
   * Conversion: I = V / R, where V is across shunt, R is shunt resistance
   */
 static float read_adc_shunt_current(void)
@@ -294,8 +292,8 @@ static float read_adc_shunt_current(void)
   uint32_t adc_raw;
   float shunt_voltage;
   float current;
-  
-  /* Start ADC conversion on channel 2 (PA2) */
+
+  /* Start ADC conversion on channel 11 (PC1) */
   if (HAL_ADC_Start(&hadc1) != HAL_OK) {
     return 0.0f;
   }
@@ -360,7 +358,7 @@ static void simulate_bms_data(void)
   /* Simulate pack voltage (sum of cells) */
   BMSCriticalInfo.isoAdcPackVoltage = (VOLTAGE_BASE * 6.0f) + (VOLTAGE_AMPLITUDE * 6.0f * sine_value);
   
-  /* Read actual current from ADC1_IN2 (PA2) INA shunt resistor */
+  /* Read actual current from ADC1_IN11 (PC1) INA output */
   BMSCriticalInfo.packCurrent = read_adc_shunt_current();
   
   /* Set status to OK */
@@ -430,10 +428,7 @@ static void uart_send_bms_telemetry(void)
   packet_data[41U] = (uint8_t)((packet.crc >> 0U) & 0xFFU);
   packet_data[42U] = (uint8_t)((packet.crc >> 8U) & 0xFFU);
 
-  // (void)HAL_UART_Transmit(&huart2, packet_data, sizeof(packet_data), 100U);
-
-  char message[] = "Hello\r\n";
-  (void)HAL_UART_Transmit(&huart2, (uint8_t*)message, strlen(message), 1000);
+  (void)HAL_UART_Transmit(&huart2, packet_data, sizeof(packet_data), 100U);
 
 
 }
@@ -470,9 +465,7 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_SPI1_Init();
-  MX_SPI3_Init();
   MX_TIM2_Init();
-  MX_TIM3_Init();
   MX_TIM1_Init();
   MX_TIM7_Init();
   MX_TIM13_Init();
@@ -481,9 +474,6 @@ int main(void)
   /* USER CODE BEGIN 2 */
   // Initialize ltc_spi to point to appropriate SPI handle (SPI1 is used for LTC6811)
   ltc_spi = &hspi1;
-  
-  // Initialize adc_spi to point to appropriate SPI handle (SPI3 is used for ADC)
-  adc_spi = &hspi3;
   
   initPECTable();
   loadConfig(&BMSConfig);
