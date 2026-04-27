@@ -57,6 +57,7 @@
 
 #define UART_TX_PERIOD_MS            200U
 #define ENABLE_UART_SIMULATION       1U
+#define ENABLE_UART_HELLO_TEST       1U
 #define UART_BMS_PACKET_SOF1         0xAAU
 #define UART_BMS_PACKET_SOF2         0x55U
 #define UART_BMS_PACKET_LEN          40U
@@ -367,6 +368,10 @@ static void simulate_bms_data(void)
 
 static void uart_send_bms_telemetry(void)
 {
+#if ENABLE_UART_HELLO_TEST
+  static const uint8_t hello_msg[] = "hello\r\n";
+  (void)HAL_UART_Transmit(&huart2, (uint8_t *)hello_msg, (uint16_t)(sizeof(hello_msg) - 1U), 100U);
+#else
   typedef struct __attribute__((packed)) {
     uint8_t sof1;
     uint8_t sof2;
@@ -431,6 +436,7 @@ static void uart_send_bms_telemetry(void)
   (void)HAL_UART_Transmit(&huart2, packet_data, sizeof(packet_data), 100U);
 
 
+#endif
 }
 
 /* USER CODE END 0 */
