@@ -18,6 +18,7 @@
 /* USER CODE BEGIN Includes */
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "stm32f4xx.h"
@@ -61,10 +62,27 @@
 #define UART_BMS_PACKET_SOF2         0x55U
 #define UART_BMS_PACKET_LEN          40U
 
+/*
+ * MAIN/SLAVE BOARD COMMUNICATION TEST MODE
+ *
+ * Keep this enabled while bringing up the main-board-to-slave-board link.
+ * The firmware prints readable UART diagnostics for LTC6811 readConfig() and
+ * voltage-read PEC checks instead of streaming the binary viewer packet.
+ *
+ * Set to 0U when you want the normal viewer telemetry stream back.
+ */
+#define ENABLE_LTC6811_COMM_TEST     1U
+#define LTC6811_COMM_TEST_PERIOD_MS  1000U
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
+#if ENABLE_LTC6811_COMM_TEST
+#define NORMAL_MODE_ONLY __attribute__((unused))
+#else
+#define NORMAL_MODE_ONLY
+#endif
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -90,6 +108,7 @@ static uint32_t last_voltage_poll_ms = 0U;
 static uint32_t last_temp_poll_ms = 0U;
 static uint32_t last_heartbeat_ms = 0U;
 static uint32_t last_uart_tx_ms = 0U;
+static uint32_t last_ltc6811_comm_test_ms = 0U;
 
 /* Simulation variables for testing BMS viewer */
 static uint32_t simulation_tick = 0U;
@@ -111,13 +130,14 @@ static void clear_all_discharge_requests(bool discharge_matrix[NUM_BOARDS][12]);
 static void stop_all_balancing(BMSConfigStructTypedef *cfg, bool discharge_matrix[NUM_BOARDS][12]);
 static bool pack_is_safe_for_discharge(const uint8_t status[6]);
 static uint16_t get_cell_imbalance_counts(const BMS_critical_info_t *bms);
-static void poll_cell_voltages_once(void);
-static void simulate_bms_data(void);
-static void poll_cell_temps_once(void);
-static void refresh_fault_state(void);
-static void handle_balancing(void);
-static void heartbeat_task(void);
+static void poll_cell_voltages_once(void) NORMAL_MODE_ONLY;
+static void simulate_bms_data(void) NORMAL_MODE_ONLY;
+static void poll_cell_temps_once(void) NORMAL_MODE_ONLY;
+static void refresh_fault_state(void) NORMAL_MODE_ONLY;
+static void handle_balancing(void) NORMAL_MODE_ONLY;
 static float read_adc_shunt_current(void);
+static void uart_send_text(const char *text);
+static void run_ltc6811_comm_test(void);
 
 /* USER CODE END PFP */
 
@@ -321,10 +341,84 @@ static float read_adc_shunt_current(void)
   return current;
 }
 
+/*
+ * MAIN/SLAVE BOARD COMMUNICATION TEST UPDATE:
+ * Small UART helper for bring-up messages. This sends plain ASCII text to the
+ * PC terminal and is intentionally separate from the binary viewer packet path.
+ */
+static void uart_send_text(const char *text)
+{
+  if (text == NULL) {
+      return;
+  }
+
+  (void)HAL_UART_Transmit(&huart2, (uint8_t *)text, (uint16_t)strlen(text), 1000U);
+}
+
+/*
+ * MAIN/SLAVE BOARD COMMUNICATION TEST UPDATE:
+ * Exercise the LTC6811 command/response path without requiring a real battery.
+ *
+ * readConfig() is the first pass/fail check because it verifies that the STM32
+ * can send a command to the slave board, receive bytes back, and validate the
+ * LTC6811 PEC. The voltage read is a second PEC check; without cell taps or a
+ * resistor-divider fake pack, the voltage values may be invalid, but a PASS
+ * still proves that the LTC6811 responded with a valid frame.
+ */
+static void run_ltc6811_comm_test(void)
+{
+  uint8_t cfg_readback[8] = {0U};
+  char line[160];
+  bool read_config_ok;
+  bool voltage_read_ok;
+  uint8_t i;
+
+  uart_send_text("\r\n[LTC6811 COMM TEST] Starting main-to-slave transaction checks\r\n");
+
+  writeConfigAll(&BMSConfig);
+  read_config_ok = readConfig(0U, cfg_readback);
+
+  (void)snprintf(line, sizeof(line),
+                 "[LTC6811 COMM TEST] readConfig PEC: %s\r\n",
+                 read_config_ok ? "PASS" : "FAIL");
+  uart_send_text(line);
+
+  (void)snprintf(line, sizeof(line),
+                 "[LTC6811 COMM TEST] cfg bytes: %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+                 cfg_readback[0], cfg_readback[1], cfg_readback[2], cfg_readback[3],
+                 cfg_readback[4], cfg_readback[5], cfg_readback[6], cfg_readback[7]);
+  uart_send_text(line);
+
+  voltage_read_ok = poll_single_secondary_voltage_reading(0U, &BMSConfig, bmsData);
+  setCriticalVoltages(&BMSCriticalInfo, bmsData);
+
+  (void)snprintf(line, sizeof(line),
+                 "[LTC6811 COMM TEST] voltage read PEC: %s\r\n",
+                 voltage_read_ok ? "PASS" : "FAIL");
+  uart_send_text(line);
+
+  for (i = 0U; i < NUM_USED_CELLS; i++) {
+      (void)snprintf(line, sizeof(line),
+                     "[LTC6811 COMM TEST] C%u raw=%u approx_mV=%u\r\n",
+                     (unsigned int)(i + 1U),
+                     (unsigned int)bmsData[i].voltage,
+                     (unsigned int)(bmsData[i].voltage / 10U));
+      uart_send_text(line);
+  }
+
+  (void)snprintf(line, sizeof(line),
+                 "[LTC6811 COMM TEST] pack monitor sum approx_mV=%u\r\n",
+                 (unsigned int)BMSCriticalInfo.cellMonitorPackVoltage);
+  uart_send_text(line);
+
+  uart_send_text("[LTC6811 COMM TEST] Done\r\n");
+}
+
 /**
   * @brief Simulate varying BMS data for testing/verification
   * Generates sine-wave varying cell voltages and temperatures
   */
+static void simulate_bms_data(void) NORMAL_MODE_ONLY;
 static void simulate_bms_data(void)
 {
   uint8_t i;
@@ -367,6 +461,7 @@ static void simulate_bms_data(void)
   (void)memset(BMS_STATUS, 0x00, sizeof(BMS_STATUS));
 }
 
+static void uart_send_bms_telemetry(void) NORMAL_MODE_ONLY;
 static void uart_send_bms_telemetry(void)
 {
   typedef struct __attribute__((packed)) {
@@ -422,8 +517,11 @@ static void uart_send_bms_telemetry(void)
 
   packet_data[31U] = (uint8_t)((packet.pack_voltage_mV >> 0U) & 0xFFU);
   packet_data[32U] = (uint8_t)((packet.pack_voltage_mV >> 8U) & 0xFFU);
-  packet_data[33U] = (uint8_t)((packet.pack_current_deciA >> 0U) & 0xFFU);
-  packet_data[34U] = (uint8_t)((packet.pack_current_deciA >> 8U) & 0xFFU);
+  {
+    uint16_t current_u16 = (uint16_t)packet.pack_current_deciA;
+    packet_data[33U] = (uint8_t)((current_u16 >> 0U) & 0xFFU);
+    packet_data[34U] = (uint8_t)((current_u16 >> 8U) & 0xFFU);
+  }
   (void)memcpy(&packet_data[35U], packet.status, 6U);
 
   packet.crc = crc16_ccitt(packet_data, 41U);
@@ -433,7 +531,7 @@ static void uart_send_bms_telemetry(void)
   // (void)HAL_UART_Transmit(&huart2, packet_data, sizeof(packet_data), 100U);
 
   char message[] = "Hello\r\n";
-  (void)HAL_UART_Transmit(&huart2, (uint8_t*)message, strlen(message), 1000);
+  (void)HAL_UART_Transmit(&huart2, (uint8_t*)message, (uint16_t)(sizeof(message) - 1U), 1000);
 
 
 }
@@ -500,6 +598,18 @@ int main(void)
   last_heartbeat_ms = HAL_GetTick();
 
   last_uart_tx_ms = HAL_GetTick();
+  last_ltc6811_comm_test_ms = HAL_GetTick();
+
+#if ENABLE_LTC6811_COMM_TEST
+  /*
+   * MAIN/SLAVE BOARD COMMUNICATION TEST UPDATE:
+   * Print a boot banner and run one immediate LTC6811 test after peripheral
+   * initialization. Open a serial terminal at 115200 baud to view results.
+   */
+  uart_send_text("\r\nSTM32F4 main board UART is alive\r\n");
+  uart_send_text("LTC6811 communication test mode is ENABLED\r\n");
+  run_ltc6811_comm_test();
+#endif
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -511,6 +621,18 @@ int main(void)
     /* USER CODE BEGIN 3 */
     uint32_t now_ms = HAL_GetTick();
 
+#if ENABLE_LTC6811_COMM_TEST
+    /*
+     * MAIN/SLAVE BOARD COMMUNICATION TEST UPDATE:
+     * In test mode, keep the loop focused on LTC6811 command/response checks.
+     * Normal balancing and binary viewer telemetry are skipped so UART output
+     * remains readable during hardware bring-up.
+     */
+    if ((now_ms - last_ltc6811_comm_test_ms) >= LTC6811_COMM_TEST_PERIOD_MS) {
+      run_ltc6811_comm_test();
+      last_ltc6811_comm_test_ms = now_ms;
+    }
+#else
     if ((now_ms - last_voltage_poll_ms) >= VOLTAGE_POLL_PERIOD_MS) {
       poll_cell_voltages_once();
       last_voltage_poll_ms = now_ms;
@@ -536,6 +658,7 @@ int main(void)
     }
 
     simulation_tick++;
+#endif
   }
   /* USER CODE END 3 */
 }
