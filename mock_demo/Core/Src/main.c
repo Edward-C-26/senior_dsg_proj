@@ -78,16 +78,15 @@ static uint32_t last_temp_poll_ms = 0U;
 static uint32_t last_heartbeat_ms = 0U;
 static uint32_t last_uart_tx_ms = 0U;
 static uint32_t simulation_tick = 0U;
+static float simulation_soc = 0.88f;
+static uint16_t last_cell_voltage_counts[NUM_USED_CELLS] = {0U};
+static float sim_temp_group_a_c = 27.0f;
+static float sim_temp_group_b_c = 28.5f;
 
 static const float ADC_REF_VOLTAGE = 3.3f;
 static const float ADC_MAX_VALUE = 4095.0f;
 static const float SHUNT_RESISTOR = 0.000001f;
-static const float SIM_BASE_CELL_V = 3.92f;
-static const float SIM_SWING_CELL_V = 0.18f;
-static const float SIM_BASE_TEMP_C = 28.0f;
-static const float SIM_SWING_TEMP_C = 7.0f;
-static const float SIM_BASE_CURRENT_A = 6.0f;
-static const float SIM_SWING_CURRENT_A = 1.5f;
+static const float SIM_CELL_OFFSETS_MV[NUM_USED_CELLS] = {-8.0f, 5.0f, 12.0f, 3.0f, -4.0f, -10.0f};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -109,6 +108,7 @@ static void handle_balancing(void);
 static float read_adc_shunt_current(void);
 static void uart_send_bms_telemetry(void);
 static uint16_t crc16_ccitt(const uint8_t *data, uint16_t length);
+static float sim_ocv_from_soc(float soc);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -165,50 +165,73 @@ static void poll_cell_temps_once(void)
 static void simulate_bms_data(void)
 {
   uint8_t i;
-  float triangle_phase;
-  float triangle_wave;
+  float ripple_phase;
+  float ripple_wave;
   float current_a;
+  float base_ocv_v;
+  float load_droop_v;
   uint32_t total_pack_mV = 0U;
 
-  triangle_phase = (float)(simulation_tick % 60U) / 60.0f;
-  if (triangle_phase < 0.5f) {
-    triangle_wave = (4.0f * triangle_phase) - 1.0f;
+  ripple_phase = (float)(simulation_tick % 70U) / 70.0f;
+  if (ripple_phase < 0.5f) {
+    ripple_wave = (4.0f * ripple_phase) - 1.0f;
   } else {
-    triangle_wave = 3.0f - (4.0f * triangle_phase);
+    ripple_wave = 3.0f - (4.0f * ripple_phase);
   }
 
-  current_a = SIM_BASE_CURRENT_A + (SIM_SWING_CURRENT_A * triangle_wave);
+  current_a = 6.5f + (0.8f * ripple_wave);
   if (current_a < 0.0f) {
     current_a = 0.0f;
   }
 
+  simulation_soc -= (current_a * 0.2f) / (3600.0f * 4.0f);
+  if (simulation_soc < 0.05f) {
+    simulation_soc = 0.05f;
+  }
+
+  base_ocv_v = sim_ocv_from_soc(simulation_soc);
+  load_droop_v = current_a * 0.018f;
+
   for (i = 0U; i < NUM_USED_CELLS; i++) {
-    float cell_offset_v = ((float)i - 2.5f) * 0.008f;
-    float drift_v = (i == 2U) ? ((float)(simulation_tick % 80U) * 0.0008f) : 0.0f;
-    float cell_voltage_v = SIM_BASE_CELL_V + (SIM_SWING_CELL_V * triangle_wave) + cell_offset_v + drift_v;
-    float cell_temp_c = SIM_BASE_TEMP_C + (SIM_SWING_TEMP_C * triangle_wave) + ((i < 3U) ? 0.5f : 2.0f);
+    float ripple_mv = (float)((((simulation_tick + (uint32_t)(i * 9U)) % 9U)) - 4) * 0.6f;
+    float imbalance_drift_mv = (i == 2U) ? (0.04f * (float)simulation_tick) : 0.0f;
+    float cell_voltage_v = base_ocv_v - load_droop_v +
+                           ((SIM_CELL_OFFSETS_MV[i] + ripple_mv + imbalance_drift_mv) / 1000.0f);
     uint16_t cell_voltage_counts;
-    uint16_t cell_temp_mC;
 
-    if (cell_voltage_v < 3.0f) {
-      cell_voltage_v = 3.0f;
+    if (cell_voltage_v < 2.8f) {
+      cell_voltage_v = 2.8f;
     }
-    if (cell_voltage_v > 4.2f) {
-      cell_voltage_v = 4.2f;
+    if (cell_voltage_v > 4.3f) {
+      cell_voltage_v = 4.3f;
     }
-    if (cell_temp_c < 10.0f) {
-      cell_temp_c = 10.0f;
-    }
-    if (cell_temp_c > 62.0f) {
-      cell_temp_c = 62.0f;
-    }
-
     cell_voltage_counts = (uint16_t)(cell_voltage_v * 10000.0f);
-    cell_temp_mC = (uint16_t)(cell_temp_c * 1000.0f);
+
+    if ((last_cell_voltage_counts[i] != 0U) && (cell_voltage_counts > last_cell_voltage_counts[i])) {
+      cell_voltage_counts = last_cell_voltage_counts[i];
+    }
 
     bmsData[i].voltage = cell_voltage_counts;
-    bmsData[i].temperature = cell_temp_mC;
+    last_cell_voltage_counts[i] = cell_voltage_counts;
     total_pack_mV += (uint32_t)(cell_voltage_counts / 10U);
+  }
+
+  sim_temp_group_a_c += (0.08f * ((27.0f + (0.9f * current_a)) - sim_temp_group_a_c));
+  sim_temp_group_b_c += (0.08f * ((28.0f + (1.1f * current_a)) - sim_temp_group_b_c));
+
+  for (i = 0U; i < NUM_USED_CELLS; i++) {
+    float temp_c = (i < 3U) ? sim_temp_group_a_c : sim_temp_group_b_c;
+    float temp_ripple_c = (float)((((simulation_tick + (uint32_t)(i * 5U)) % 7U)) - 3) * 0.03f;
+
+    temp_c += temp_ripple_c;
+    if (temp_c < 0.0f) {
+      temp_c = 0.0f;
+    }
+    if (temp_c > 80.0f) {
+      temp_c = 80.0f;
+    }
+
+    bmsData[i].temperature = (uint16_t)(temp_c * 1000.0f);
   }
 
   setCriticalVoltages(&BMSCriticalInfo, bmsData);
@@ -229,6 +252,24 @@ static void simulate_bms_data(void)
   if (BMSCriticalInfo.curr_min_temp < BMSConfig.UT_threshold) {
     BMS_STATUS[0] |= 0x08U;
   }
+}
+
+static float sim_ocv_from_soc(float soc)
+{
+  if (soc > 1.0f) {
+    soc = 1.0f;
+  }
+  if (soc < 0.0f) {
+    soc = 0.0f;
+  }
+
+  if (soc > 0.90f) {
+    return 4.00f + (((soc - 0.90f) / 0.10f) * 0.18f);
+  }
+  if (soc > 0.20f) {
+    return 3.65f + (((soc - 0.20f) / 0.70f) * 0.35f);
+  }
+  return 3.00f + ((soc / 0.20f) * 0.65f);
 }
 
 static void refresh_fault_state(void)
