@@ -58,6 +58,7 @@
 #define UART_TX_PERIOD_MS            200U
 #define ENABLE_UART_SIMULATION       1U
 #define ENABLE_UART_HELLO_TEST       1U
+#define ENABLE_LTC_ISOSPI_TEST       1U
 #define UART_BMS_PACKET_SOF1         0xAAU
 #define UART_BMS_PACKET_SOF2         0x55U
 #define UART_BMS_PACKET_LEN          40U
@@ -117,6 +118,7 @@ static void poll_cell_temps_once(void);
 static void refresh_fault_state(void);
 static void handle_balancing(void);
 static float read_adc_shunt_current(void);
+static void ltc_isospi_test_task(void);
 
 /* USER CODE END PFP */
 
@@ -219,6 +221,38 @@ static void refresh_fault_state(void)
   } else {
       HAL_GPIO_WritePin(BMS_FLT_EN_GPIO_Port, BMS_FLT_EN_Pin, GPIO_PIN_RESET);
   }
+}
+
+static void ltc_isospi_test_task(void)
+{
+  uint8_t cfg_readback[8] = {0};
+  static const uint8_t ok_msg[] = "LTC OK\r\n";
+  static const uint8_t fail_msg[] = "LTC FAIL\r\n";
+  static const uint8_t header_msg[] = "LTC/isoSPI config read test\r\n";
+  static bool printed_header = false;
+  bool read_ok;
+
+  if (!printed_header) {
+      (void)HAL_UART_Transmit(&huart2, (uint8_t *)header_msg,
+                              (uint16_t)(sizeof(header_msg) - 1U), 100U);
+      printed_header = true;
+  }
+
+  wakeup_idle();
+  writeConfigAddress(&BMSConfig, BMSConfig.address[0]);
+
+  wakeup_idle();
+  read_ok = readConfig(BMSConfig.address[0], cfg_readback);
+
+  if (read_ok) {
+      (void)HAL_UART_Transmit(&huart2, (uint8_t *)ok_msg,
+                              (uint16_t)(sizeof(ok_msg) - 1U), 100U);
+  } else {
+      (void)HAL_UART_Transmit(&huart2, (uint8_t *)fail_msg,
+                              (uint16_t)(sizeof(fail_msg) - 1U), 100U);
+  }
+
+  HAL_Delay(500U);
 }
 
 /*
@@ -489,7 +523,8 @@ int main(void)
   (void)memset(BMS_STATUS, 0, sizeof(BMS_STATUS));
   (void)memset(bmsData, 0, sizeof(bmsData));
 
-  writeConfigAll(&BMSConfig);
+  /* Normal BMS config write disabled during LTC/isoSPI communication test. */
+  /* writeConfigAll(&BMSConfig); */
 
   last_voltage_poll_ms = HAL_GetTick();
   last_temp_poll_ms = HAL_GetTick();
@@ -505,6 +540,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+#if ENABLE_LTC_ISOSPI_TEST
+    ltc_isospi_test_task();
+#else
     uint32_t now_ms = HAL_GetTick();
 
     if ((now_ms - last_voltage_poll_ms) >= VOLTAGE_POLL_PERIOD_MS) {
@@ -532,6 +570,7 @@ int main(void)
     }
 
     simulation_tick++;
+#endif
   }
   /* USER CODE END 3 */
 }
