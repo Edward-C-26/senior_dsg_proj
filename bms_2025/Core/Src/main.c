@@ -56,9 +56,9 @@
 #define DEFAULT_CELL_IMBALANCE_LIMIT 150U
 
 #define UART_TX_PERIOD_MS            200U
-#define ENABLE_UART_SIMULATION       1U
-#define ENABLE_UART_HELLO_TEST       1U
-#define ENABLE_LTC_ISOSPI_TEST       1U
+#define ENABLE_UART_SIMULATION       0U
+#define ENABLE_UART_HELLO_TEST       0U
+#define ENABLE_LTC_ISOSPI_TEST       0U
 #define UART_BMS_PACKET_SOF1         0xAAU
 #define UART_BMS_PACKET_SOF2         0x55U
 #define UART_BMS_PACKET_LEN          40U
@@ -346,7 +346,8 @@ static float read_adc_shunt_current(void)
   
   /* Convert raw ADC value to voltage across shunt resistor */
   /* ADC_raw: 0-4095 maps to 0-3.3V */
-  shunt_voltage = (float)adc_raw * ADC_REF_VOLTAGE / ADC_MAX_VALUE;
+  shunt_voltage = (float)adc_raw * ADC_REF_VOLTAGE / ADC_MAX_VALUE - (ADC_REF_VOLTAGE / 2.0f); /* Center around 0V for bidirectional current */
+  shunt_voltage = shunt_voltage/50.0f;
   
   /* Calculate current from shunt resistor: I = V / R */
   current = shunt_voltage / SHUNT_RESISTOR;
