@@ -33,16 +33,35 @@ static void UART_BridgePoll(void);
 /* Private user code ---------------------------------------------------------*/
 static void UART_BridgePoll(void)
 {
+  uint32_t sr;
   uint8_t byte;
 
-  if (HAL_UART_Receive(&huart1, &byte, 1U, 0U) == HAL_OK)
+  sr = huart1.Instance->SR;
+  if ((sr & USART_SR_ORE) != 0U)
   {
-    (void)HAL_UART_Transmit(&huart2, &byte, 1U, HAL_MAX_DELAY);
+    (void)huart1.Instance->DR;
+  }
+  else if ((sr & USART_SR_RXNE) != 0U)
+  {
+    byte = (uint8_t)(huart1.Instance->DR & 0xFFU);
+    while ((huart2.Instance->SR & USART_SR_TXE) == 0U)
+    {
+    }
+    huart2.Instance->DR = byte;
   }
 
-  if (HAL_UART_Receive(&huart2, &byte, 1U, 0U) == HAL_OK)
+  sr = huart2.Instance->SR;
+  if ((sr & USART_SR_ORE) != 0U)
   {
-    (void)HAL_UART_Transmit(&huart1, &byte, 1U, HAL_MAX_DELAY);
+    (void)huart2.Instance->DR;
+  }
+  else if ((sr & USART_SR_RXNE) != 0U)
+  {
+    byte = (uint8_t)(huart2.Instance->DR & 0xFFU);
+    while ((huart1.Instance->SR & USART_SR_TXE) == 0U)
+    {
+    }
+    huart1.Instance->DR = byte;
   }
 }
 
