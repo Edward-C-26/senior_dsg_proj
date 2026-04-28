@@ -431,11 +431,10 @@ bool dischargeCellGroups(BMSConfigStructTypedef *cfg, bool cellDischarge[12][12]
 
 //! @brief This function is used to wakeup the LTC chip that we want to use to get readings from 
 void inline wakeup_idle() {
-	uint32_t delay = 1;
 	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
-	while (delay--)
-		;
+	HAL_Delay(1);
 	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
+	HAL_Delay(1);
 }
 
 bool poll_single_secondary_voltage_reading(uint8_t board_num, BMSConfigStructTypedef *cfg, CellData bmsData[]){

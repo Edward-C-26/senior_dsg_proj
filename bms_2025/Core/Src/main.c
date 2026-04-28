@@ -119,6 +119,10 @@ static void refresh_fault_state(void);
 static void handle_balancing(void);
 static float read_adc_shunt_current(void);
 static void ltc_isospi_test_task(void);
+static bool ltc_read_config_raw(bool addressed, uint8_t address, uint8_t rx_data[12]);
+static void uart_write_str(const char *text);
+static void uart_write_hex_byte(uint8_t value);
+static void uart_write_hex_buffer(const uint8_t *data, uint8_t length);
 
 /* USER CODE END PFP */
 
@@ -225,34 +229,96 @@ static void refresh_fault_state(void)
 
 static void ltc_isospi_test_task(void)
 {
-  uint8_t cfg_readback[8] = {0};
-  static const uint8_t ok_msg[] = "LTC OK\r\n";
-  static const uint8_t fail_msg[] = "LTC FAIL\r\n";
-  static const uint8_t header_msg[] = "LTC/isoSPI config read test\r\n";
+  uint8_t rx_broadcast[12] = {0};
+  uint8_t rx_addressed[12] = {0};
+  bool broadcast_ok;
+  bool addressed_ok;
   static bool printed_header = false;
-  bool read_ok;
 
   if (!printed_header) {
-      (void)HAL_UART_Transmit(&huart2, (uint8_t *)header_msg,
-                              (uint16_t)(sizeof(header_msg) - 1U), 100U);
+      uart_write_str("LTC/isoSPI config read test\r\n");
+      uart_write_str("SPI mode: CPOL=1 CPHA=1, 1 Mbps\r\n");
       printed_header = true;
   }
 
   wakeup_idle();
-  writeConfigAddress(&BMSConfig, BMSConfig.address[0]);
+  broadcast_ok = ltc_read_config_raw(false, BMSConfig.address[0], rx_broadcast);
 
   wakeup_idle();
-  read_ok = readConfig(BMSConfig.address[0], cfg_readback);
+  addressed_ok = ltc_read_config_raw(true, BMSConfig.address[0], rx_addressed);
 
-  if (read_ok) {
-      (void)HAL_UART_Transmit(&huart2, (uint8_t *)ok_msg,
-                              (uint16_t)(sizeof(ok_msg) - 1U), 100U);
-  } else {
-      (void)HAL_UART_Transmit(&huart2, (uint8_t *)fail_msg,
-                              (uint16_t)(sizeof(fail_msg) - 1U), 100U);
-  }
+  uart_write_str("RDCFG broadcast: ");
+  uart_write_str(broadcast_ok ? "OK  rx=" : "FAIL rx=");
+  uart_write_hex_buffer(rx_broadcast, sizeof(rx_broadcast));
+  uart_write_str("\r\n");
+
+  uart_write_str("RDCFG addressed: ");
+  uart_write_str(addressed_ok ? "OK  rx=" : "FAIL rx=");
+  uart_write_hex_buffer(rx_addressed, sizeof(rx_addressed));
+  uart_write_str("\r\n");
 
   HAL_Delay(500U);
+}
+
+static bool ltc_read_config_raw(bool addressed, uint8_t address, uint8_t rx_data[12])
+{
+  uint8_t cmd[12] = {0};
+  uint8_t pec_input[6];
+  uint16_t pec;
+
+  if (addressed) {
+      cmd[0] = (uint8_t)(0x80U | ((address << 3) & 0x78U) |
+                         ((ReadConfigurationRegisterGroup >> 8) & 0x07U));
+  } else {
+      cmd[0] = (uint8_t)((ReadConfigurationRegisterGroup >> 8) & 0x0FU);
+  }
+  cmd[1] = (uint8_t)(ReadConfigurationRegisterGroup & 0xFFU);
+
+  pec = calculatePEC(2U, cmd);
+  cmd[2] = (uint8_t)((pec >> 8) & 0xFFU);
+  cmd[3] = (uint8_t)(pec & 0xFFU);
+
+  (void)memset(rx_data, 0, 12U);
+  if (!SPIWriteRead(cmd, rx_data, 12U)) {
+      return false;
+  }
+
+  pec_input[0] = rx_data[4];
+  pec_input[1] = rx_data[5];
+  pec_input[2] = rx_data[6];
+  pec_input[3] = rx_data[7];
+  pec_input[4] = rx_data[8];
+  pec_input[5] = rx_data[9];
+
+  pec = calculatePEC(6U, pec_input);
+  return (pec == (uint16_t)(((uint16_t)rx_data[10] << 8) | rx_data[11]));
+}
+
+static void uart_write_str(const char *text)
+{
+  (void)HAL_UART_Transmit(&huart2, (uint8_t *)text, (uint16_t)strlen(text), 100U);
+}
+
+static void uart_write_hex_byte(uint8_t value)
+{
+  static const char hex[] = "0123456789ABCDEF";
+  uint8_t chars[2];
+
+  chars[0] = (uint8_t)hex[(value >> 4) & 0x0FU];
+  chars[1] = (uint8_t)hex[value & 0x0FU];
+  (void)HAL_UART_Transmit(&huart2, chars, sizeof(chars), 100U);
+}
+
+static void uart_write_hex_buffer(const uint8_t *data, uint8_t length)
+{
+  uint8_t i;
+
+  for (i = 0U; i < length; i++) {
+      if (i > 0U) {
+          uart_write_str(" ");
+      }
+      uart_write_hex_byte(data[i]);
+  }
 }
 
 /*
