@@ -44,6 +44,8 @@ SOH_HISTORY_PATH = LOG_DIR / "soh_cycle_history.csv"
 
 VOLTAGE_OV = 4.20
 VOLTAGE_UV = 3.00
+VOLTAGE_VALID_HIGH = 4.50
+VOLTAGE_VALID_LOW = 2.50
 VOLTAGE_WARN_HIGH = 4.10
 VOLTAGE_WARN_LOW = 3.15
 SOC_CELL_FULL_V = 4.20
@@ -148,8 +150,12 @@ class CellCard(ttk.Frame):
         normalized = max(0.0, min(1.0, (voltage_v - SOC_CELL_EMPTY_V) / (SOC_CELL_FULL_V - SOC_CELL_EMPTY_V)))
         # Redraw the battery bar using the current state color.
         self._draw_bar(normalized, color)
-        # Show latest voltage and temperature text.
-        self.voltage_label.configure(text=f"{voltage_v:.3f} V", foreground=color)
+        # Hide impossible LTC all-ones/all-zeroes style values so they do not look like real cell voltages.
+        if voltage_v > VOLTAGE_VALID_HIGH or voltage_v < VOLTAGE_VALID_LOW:
+            voltage_text = "OV" if voltage_v > VOLTAGE_OV else "UV"
+        else:
+            voltage_text = f"{voltage_v:.3f} V"
+        self.voltage_label.configure(text=voltage_text, foreground=color)
         self.temp_label.configure(text=f"{temp_c:.1f} °C")
         # Show state label (Normal/Warning/Fault) in matching color.
         self.state_label.configure(text=state_text, foreground=color)
@@ -734,8 +740,10 @@ class BmsViewerApp:
         # The first status byte mirrors firmware fault bits; imbalance is derived locally
         # so we can still surface pack spread even if firmware does not flag it yet.
         status0 = frame.status_bytes[0]
-        ov = bool(status0 & 0x01)
-        uv = bool(status0 & 0x02)
+        local_ov = any((value / 1000.0) > VOLTAGE_OV for value in frame.cell_voltage_mv)
+        local_uv = any((value / 1000.0) < VOLTAGE_UV for value in frame.cell_voltage_mv)
+        ov = bool(status0 & 0x01) or local_ov
+        uv = bool(status0 & 0x02) or local_uv
         ot = bool(status0 & 0x04)
         ut = bool(status0 & 0x08)
         imbalance = frame.imbalance_mv >= 150
