@@ -99,11 +99,14 @@ static const uint16_t sim_cell_voltage_counts[NUM_USED_CELLS] = {
 static const uint16_t sim_cell_temp_mC[NUM_USED_CELLS] = {
   28000U, 28100U, 27900U, 28000U, 28200U, 28100U
 };
-static const int16_t sim_voltage_wave_counts[8] = {
-  -500, -250, 0, 250, 500, 250, 0, -250
+static const int16_t sim_voltage_wave_counts[16] = {
+  -50, -42, -35, -25, -12, 0, 12, 25, 35, 42, 50, 42, 35, 25, 12, 0
 };
-static const int16_t sim_current_wave_centiA[8] = {
-  -5, -3, 0, 3, 5, 3, 0, -3
+static const uint8_t sim_cell_wave_phase[NUM_USED_CELLS] = {
+  0U, 3U, 6U, 9U, 12U, 15U
+};
+static const int16_t sim_current_wave_centiA[16] = {
+  -2, -2, -1, -1, 0, 0, 1, 1, 2, 2, 1, 1, 0, 0, -1, -1
 };
 
 /* ADC configuration for INA shunt current measurement */
@@ -445,12 +448,14 @@ static float read_adc_shunt_current(void)
   */
 static void simulate_bms_data(void)
 {
-  uint8_t wave_index = (uint8_t)(sensor_simulation_tick % 8U);
-  int16_t voltage_offset_counts = sim_voltage_wave_counts[wave_index];
-  int16_t current_centiA = (int16_t)(120 + sim_current_wave_centiA[wave_index]);
+  uint8_t voltage_wave_index = (uint8_t)((sensor_simulation_tick / 2U) % 16U);
+  uint8_t current_wave_index = (uint8_t)((sensor_simulation_tick / 20U) % 16U);
+  int16_t current_centiA = (int16_t)(120 + sim_current_wave_centiA[current_wave_index]);
   uint8_t i;
 
   for (i = 0U; i < NUM_USED_CELLS; i++) {
+    uint8_t cell_wave_index = (uint8_t)((voltage_wave_index + sim_cell_wave_phase[i]) % 16U);
+    int16_t voltage_offset_counts = sim_voltage_wave_counts[cell_wave_index];
     bmsData[i].voltage = (uint16_t)((int32_t)sim_cell_voltage_counts[i] + voltage_offset_counts);
     bmsData[i].temperature = sim_cell_temp_mC[i];
   }
