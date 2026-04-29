@@ -56,7 +56,7 @@
 #define DEFAULT_CELL_IMBALANCE_LIMIT 150U
 
 #define UART_TX_PERIOD_MS            200U
-#define ENABLE_SENSOR_SIMULATION     0U
+#define ENABLE_SENSOR_SIMULATION     1U
 #define ENABLE_UART_HELLO_TEST       0U
 #define ENABLE_LTC_ISOSPI_TEST       0U
 #define UART_BMS_PACKET_SOF1         0xAAU
@@ -217,7 +217,7 @@ static void poll_cell_temps_once(void)
  */
 static void refresh_fault_state(void)
 {
-  // bmsFault = FAULT_check(&BMSCriticalInfo, &BMSConfig, BMS_STATUS); temporarily disable fault checking for bench testing
+  bmsFault = FAULT_check(&BMSCriticalInfo, &BMSConfig, BMS_STATUS); temporarily disable fault checking for bench testing
 
   if (bmsFault) {
       HAL_GPIO_WritePin(BMS_FLT_EN_GPIO_Port, BMS_FLT_EN_Pin, GPIO_PIN_SET);
