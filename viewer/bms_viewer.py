@@ -303,7 +303,7 @@ class BmsViewerApp:
         header.columnconfigure(0, weight=1)
 
         ttk.Label(header, text="Battery Management System Viewer", style="Header.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(header, text="29 April", style="Subtle.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 0))
+        ttk.Label(header, text="26 April", style="Subtle.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 0))
 
         controls = ttk.Frame(outer, style="Card.TFrame", padding=14)
         controls.grid(row=1, column=0, sticky="ew", pady=(16, 14))

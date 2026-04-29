@@ -91,12 +91,19 @@ static uint32_t last_voltage_poll_ms = 0U;
 static uint32_t last_temp_poll_ms = 0U;
 static uint32_t last_heartbeat_ms = 0U;
 static uint32_t last_uart_tx_ms = 0U;
+static uint32_t sensor_simulation_tick = 0U;
 
 static const uint16_t sim_cell_voltage_counts[NUM_USED_CELLS] = {
   38000U, 38020U, 37980U, 38010U, 37990U, 38000U
 };
 static const uint16_t sim_cell_temp_mC[NUM_USED_CELLS] = {
   28000U, 28100U, 27900U, 28000U, 28200U, 28100U
+};
+static const int16_t sim_voltage_wave_counts[8] = {
+  -500, -250, 0, 250, 500, 250, 0, -250
+};
+static const int16_t sim_current_wave_centiA[8] = {
+  -5, -3, 0, 3, 5, 3, 0, -3
 };
 
 /* ADC configuration for INA shunt current measurement */
@@ -438,17 +445,22 @@ static float read_adc_shunt_current(void)
   */
 static void simulate_bms_data(void)
 {
+  uint8_t wave_index = (uint8_t)(sensor_simulation_tick % 8U);
+  int16_t voltage_offset_counts = sim_voltage_wave_counts[wave_index];
+  int16_t current_centiA = (int16_t)(120 + sim_current_wave_centiA[wave_index]);
   uint8_t i;
 
   for (i = 0U; i < NUM_USED_CELLS; i++) {
-    bmsData[i].voltage = sim_cell_voltage_counts[i];
+    bmsData[i].voltage = (uint16_t)((int32_t)sim_cell_voltage_counts[i] + voltage_offset_counts);
     bmsData[i].temperature = sim_cell_temp_mC[i];
   }
 
   setCriticalVoltages(&BMSCriticalInfo, bmsData);
   setCriticalTemps(&BMSCriticalInfo, bmsData);
+  BMSCriticalInfo.packCurrent = (float)current_centiA / 100.0f;
 
   (void)memset(BMS_STATUS, 0x00, sizeof(BMS_STATUS));
+  sensor_simulation_tick++;
 }
 
 static void uart_send_bms_telemetry(void)
@@ -465,7 +477,7 @@ static void uart_send_bms_telemetry(void)
     uint16_t cell_voltage_mV[NUM_USED_CELLS];
     int16_t cell_temp_cC[NUM_USED_CELLS];
     uint16_t pack_voltage_mV;
-    int16_t pack_current_deciA;
+    int16_t pack_current_centiA;
     uint8_t status[6];
     uint16_t crc;
   } BmsUartPacket_t;
@@ -491,8 +503,12 @@ static void uart_send_bms_telemetry(void)
   } else {
     packet.pack_voltage_mV = (uint16_t)sanitized_pack_voltage_mV;
   }
+#if ENABLE_SENSOR_SIMULATION
+  packet.pack_current_centiA = (int16_t)(BMSCriticalInfo.packCurrent * 100.0f);
+#else
   BMSCriticalInfo.packCurrent = read_adc_shunt_current();
-  packet.pack_current_deciA = (int16_t)(BMSCriticalInfo.packCurrent * 10.0f);
+  packet.pack_current_centiA = (int16_t)(BMSCriticalInfo.packCurrent * 100.0f);
+#endif
   (void)memcpy(packet.status, BMS_STATUS, sizeof(packet.status));
 
   packet_data[0] = packet.sof1;
@@ -516,8 +532,8 @@ static void uart_send_bms_telemetry(void)
 
   packet_data[31U] = (uint8_t)((packet.pack_voltage_mV >> 0U) & 0xFFU);
   packet_data[32U] = (uint8_t)((packet.pack_voltage_mV >> 8U) & 0xFFU);
-  packet_data[33U] = (uint8_t)((packet.pack_current_deciA >> 0U) & 0xFFU);
-  packet_data[34U] = (uint8_t)((packet.pack_current_deciA >> 8U) & 0xFFU);
+  packet_data[33U] = (uint8_t)((packet.pack_current_centiA >> 0U) & 0xFFU);
+  packet_data[34U] = (uint8_t)((packet.pack_current_centiA >> 8U) & 0xFFU);
   (void)memcpy(&packet_data[35U], packet.status, 6U);
 
   packet.crc = crc16_ccitt(packet_data, 41U);

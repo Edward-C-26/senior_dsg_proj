@@ -148,7 +148,7 @@ def decode_packet(packet: bytes) -> TelemetryFrame:
     cell_voltage_mv = rest[0:6]
     cell_temp_cc = rest[6:12]
     pack_voltage_mv = rest[12]
-    pack_current_decia = rest[13]
+    pack_current_centia = rest[13]
     status_bytes = rest[14:20]
     return TelemetryFrame(
         timestamp_ms=timestamp_ms,
@@ -157,8 +157,8 @@ def decode_packet(packet: bytes) -> TelemetryFrame:
         cell_temp_c=[value / 100.0 for value in cell_temp_cc],
         pack_voltage_mv=pack_voltage_mv,
         status_bytes=list(status_bytes),
-        # Firmware stores current as signed deci-amps.
-        pack_current_a=pack_current_decia / 10.0,
+        # Firmware stores current as signed centi-amps.
+        pack_current_a=pack_current_centia / 100.0,
     )
 
 
@@ -172,8 +172,8 @@ def build_firmware_packet(
 ) -> bytes:
     # Convert temperature floats to signed centi-degrees for transport.
     temps_cc = [int(round(value * 100.0)) for value in cell_temp_c]
-    # Match firmware: convert amps to signed deci-amps.
-    current_decia = int(round(pack_current_a * 10.0))
+    # Match firmware: convert amps to signed centi-amps.
+    current_centia = int(round(pack_current_a * 100.0))
     # Pack structure with placeholder CRC at the end.
     packet = struct.pack(
         FIRMWARE_PACKET_FORMAT,
@@ -183,7 +183,7 @@ def build_firmware_packet(
         *cell_voltage_mv,
         *temps_cc,
         pack_voltage_mv,
-        current_decia,
+        current_centia,
         *status_bytes,
         0,
     )
