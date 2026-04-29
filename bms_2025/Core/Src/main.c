@@ -94,7 +94,7 @@ static uint32_t last_uart_tx_ms = 0U;
 
 /* Simulation variables for testing BMS viewer while LTC/isoSPI is unavailable. */
 static uint32_t simulation_tick = 0U;
-static uint16_t simulated_cell_voltage_counts = 37000U;
+static uint16_t simulated_cell_voltage_counts = 39000U;
 static uint16_t simulated_temp_mC = 25000U;
 static int16_t simulated_temp_step_mC = 50;
 
@@ -432,7 +432,7 @@ static float read_adc_shunt_current(void)
 /**
   * @brief Simulate voltage and temperature while keeping current live.
   *
-  * Voltage starts at 3.700 V/cell and slowly drifts down to 3.690 V/cell.
+  * Voltage starts at 3.900 V/cell and slowly drifts down to 3.890 V/cell.
   * Temperature moves gently between 25 C and 27 C.
   */
 static void simulate_bms_data(void)
@@ -440,7 +440,7 @@ static void simulate_bms_data(void)
   uint8_t i;
 
   if ((simulation_tick > 0U) && ((simulation_tick % 50U) == 0U) &&
-      (simulated_cell_voltage_counts > 36900U)) {
+      (simulated_cell_voltage_counts > 38900U)) {
     simulated_cell_voltage_counts--;
   }
 
