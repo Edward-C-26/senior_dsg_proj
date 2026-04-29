@@ -56,7 +56,7 @@
 #define DEFAULT_CELL_IMBALANCE_LIMIT 150U
 
 #define UART_TX_PERIOD_MS            200U
-#define ENABLE_UART_SIMULATION       0U
+#define ENABLE_SENSOR_SIMULATION     0U
 #define ENABLE_UART_HELLO_TEST       0U
 #define ENABLE_LTC_ISOSPI_TEST       0U
 #define UART_BMS_PACKET_SOF1         0xAAU
@@ -92,12 +92,11 @@ static uint32_t last_temp_poll_ms = 0U;
 static uint32_t last_heartbeat_ms = 0U;
 static uint32_t last_uart_tx_ms = 0U;
 
-/* Simulation variables for testing BMS viewer */
+/* Simulation variables for testing BMS viewer while LTC/isoSPI is unavailable. */
 static uint32_t simulation_tick = 0U;
-static const float VOLTAGE_BASE = 3.7f;    /* Base cell voltage in volts */
-static const float VOLTAGE_AMPLITUDE = 0.3f; /* Varies by +/-0.3V */
-static const float TEMP_BASE = 25.0f;      /* Base temperature in C */
-static const float TEMP_AMPLITUDE = 10.0f; /* Varies by +/-10C */
+static uint16_t simulated_cell_voltage_counts = 37000U;
+static uint16_t simulated_temp_mC = 25000U;
+static int16_t simulated_temp_step_mC = 50;
 
 /* ADC configuration for INA shunt current measurement */
 static const float ADC_REF_VOLTAGE = 3.3f;  /* ADC reference voltage (3.3V) */
@@ -422,49 +421,48 @@ static float read_adc_shunt_current(void)
 }
 
 /**
-  * @brief Simulate varying BMS data for testing/verification
-  * Generates sine-wave varying cell voltages and temperatures
+  * @brief Simulate voltage and temperature while keeping current live.
+  *
+  * Voltage starts at 3.700 V/cell and slowly drifts down to 3.690 V/cell.
+  * Temperature moves gently between 25 C and 27 C.
   */
 static void simulate_bms_data(void)
 {
   uint8_t i;
-  float sine_value;
-  static const float PI = 3.14159265359f;
-  
-  /* Generate sine wave that cycles every ~10 seconds */
-  float phase = (2.0f * PI * (float)(simulation_tick % 50)) / 50.0f;
-  
-  /* Simple sine approximation using symmetry */
-  if (phase < PI) {
-    sine_value = 2.0f * phase / PI - 1.0f;
-  } else {
-    sine_value = 3.0f - 2.0f * phase / PI;
+
+  if ((simulation_tick > 0U) && ((simulation_tick % 50U) == 0U) &&
+      (simulated_cell_voltage_counts > 36900U)) {
+    simulated_cell_voltage_counts--;
   }
-  
-  /* Clip to [-1, 1] */
-  if (sine_value > 1.0f) sine_value = 1.0f;
-  if (sine_value < -1.0f) sine_value = -1.0f;
-  
-  /* Simulate 6 cell voltages varying around base voltage */
+
+  simulated_temp_mC = (uint16_t)((int32_t)simulated_temp_mC + simulated_temp_step_mC);
+  if (simulated_temp_mC >= 27000U) {
+    simulated_temp_mC = 27000U;
+    simulated_temp_step_mC = -50;
+  } else if (simulated_temp_mC <= 25000U) {
+    simulated_temp_mC = 25000U;
+    simulated_temp_step_mC = 50;
+  }
+
   for (i = 0U; i < NUM_USED_CELLS; i++) {
-    float cell_voltage = VOLTAGE_BASE + (VOLTAGE_AMPLITUDE * sine_value);
-    bmsData[i].voltage = (uint16_t)(cell_voltage * 10000.0f);  /* Store in 100uV units */
+    int32_t cell_temp_mC = (int32_t)simulated_temp_mC + ((int32_t)(i % 3U) * 100) - 100;
+
+    if (cell_temp_mC < 25000) {
+      cell_temp_mC = 25000;
+    } else if (cell_temp_mC > 27000) {
+      cell_temp_mC = 27000;
+    }
+
+    bmsData[i].voltage = simulated_cell_voltage_counts;
+    bmsData[i].temperature = (uint16_t)cell_temp_mC;
   }
-  
-  /* Simulate cell temperatures varying */
-  for (i = 0U; i < NUM_USED_CELLS; i++) {
-    float cell_temp = TEMP_BASE + (TEMP_AMPLITUDE * sine_value);
-    bmsData[i].temperature = (uint16_t)(cell_temp * 1000.0f);  /* Store in mC */
-  }
-  
-  /* Simulate pack voltage (sum of cells) */
-  BMSCriticalInfo.isoAdcPackVoltage = (VOLTAGE_BASE * 6.0f) + (VOLTAGE_AMPLITUDE * 6.0f * sine_value);
-  
-  /* Read actual current from ADC1_IN11 (PC1) INA output */
-  BMSCriticalInfo.packCurrent = read_adc_shunt_current();
-  
-  /* Set status to OK */
+
+  setCriticalVoltages(&BMSCriticalInfo, bmsData);
+  setCriticalTemps(&BMSCriticalInfo, bmsData);
+
   (void)memset(BMS_STATUS, 0x00, sizeof(BMS_STATUS));
+
+  simulation_tick++;
 }
 
 static void uart_send_bms_telemetry(void)
@@ -612,6 +610,14 @@ int main(void)
 #else
     uint32_t now_ms = HAL_GetTick();
 
+#if ENABLE_SENSOR_SIMULATION
+    if ((now_ms - last_voltage_poll_ms) >= VOLTAGE_POLL_PERIOD_MS) {
+      simulate_bms_data();
+      refresh_fault_state();
+      last_voltage_poll_ms = now_ms;
+      last_temp_poll_ms = now_ms;
+    }
+#else
     if ((now_ms - last_voltage_poll_ms) >= VOLTAGE_POLL_PERIOD_MS) {
       poll_cell_voltages_once();
       last_voltage_poll_ms = now_ms;
@@ -624,6 +630,7 @@ int main(void)
 
     refresh_fault_state();
     handle_balancing();
+#endif
 
     if ((now_ms - last_heartbeat_ms) >= HEARTBEAT_PERIOD_MS) {
       // heartbeat_task();
@@ -631,12 +638,9 @@ int main(void)
     }
 
     if ((now_ms - last_uart_tx_ms) >= UART_TX_PERIOD_MS) {
-      // simulate_bms_data();  /* Simulate varying voltage/temperature for testing */
       uart_send_bms_telemetry();
       last_uart_tx_ms = now_ms;
     }
-
-    simulation_tick++;
 #endif
   }
   /* USER CODE END 3 */
