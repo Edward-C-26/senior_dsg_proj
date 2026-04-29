@@ -435,10 +435,10 @@ static float read_adc_shunt_current(void)
 }
 
 /**
-  * @brief Simulate voltage and temperature while keeping current live.
+  * @brief Simulate April 26 pre/post balancing voltage and temperature data.
   *
-  * Voltage starts at 3.900 V/cell and slowly drifts down to 3.890 V/cell.
-  * Temperature moves gently between 25 C and 27 C.
+  * ENABLE_POST_BALANCE_SIMULATION selects the post-balancing voltage set when
+  * set to 1U. The default 0U value streams the pre-balancing voltage set.
   */
 static void simulate_bms_data(void)
 {
@@ -460,8 +460,6 @@ static void simulate_bms_data(void)
   setCriticalTemps(&BMSCriticalInfo, bmsData);
 
   (void)memset(BMS_STATUS, 0x00, sizeof(BMS_STATUS));
-
-  simulation_tick++;
 }
 
 static void uart_send_bms_telemetry(void)

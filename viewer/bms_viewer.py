@@ -64,6 +64,7 @@ TEMP_OT = 60.0
 TEMP_UT = 0.0
 TEMP_WARN_HIGH = 55.0
 TEMP_WARN_LOW = 5.0
+IMBALANCE_FAULT_MV = 50
 
 # App background color.
 BG = "#F4F1EA"
@@ -747,7 +748,7 @@ class BmsViewerApp:
         uv = bool(status0 & 0x02) or local_uv
         ot = bool(status0 & 0x04)
         ut = bool(status0 & 0x08)
-        imbalance = frame.imbalance_mv >= 150
+        imbalance = frame.imbalance_mv >= IMBALANCE_FAULT_MV
 
         self.fault_badges["OV"].set_state(ov, "Fault" if ov else "Normal")
         self.fault_badges["UV"].set_state(uv, "Fault" if uv else "Normal")
