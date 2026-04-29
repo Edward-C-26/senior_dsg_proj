@@ -57,6 +57,7 @@
 
 #define UART_TX_PERIOD_MS            200U
 #define ENABLE_SENSOR_SIMULATION     1U
+#define ENABLE_POST_BALANCE_SIMULATION 0U
 #define ENABLE_UART_HELLO_TEST       0U
 #define ENABLE_LTC_ISOSPI_TEST       0U
 #define UART_BMS_PACKET_SOF1         0xAAU
@@ -92,11 +93,15 @@ static uint32_t last_temp_poll_ms = 0U;
 static uint32_t last_heartbeat_ms = 0U;
 static uint32_t last_uart_tx_ms = 0U;
 
-/* Simulation variables for testing BMS viewer while LTC/isoSPI is unavailable. */
-static uint32_t simulation_tick = 0U;
-static uint16_t simulated_cell_voltage_counts = 39000U;
-static uint16_t simulated_temp_mC = 25000U;
-static int16_t simulated_temp_step_mC = 50;
+static const uint16_t sim_pre_balance_voltage_counts[NUM_USED_CELLS] = {
+  37580U, 38200U, 38580U, 38000U, 38420U, 38300U
+};
+static const uint16_t sim_post_balance_voltage_counts[NUM_USED_CELLS] = {
+  38000U, 38010U, 38000U, 37990U, 38010U, 38000U
+};
+static const uint16_t sim_april_26_temp_mC[NUM_USED_CELLS] = {
+  29000U, 27500U, 28800U, 28000U, 27300U, 28700U
+};
 
 /* ADC configuration for INA shunt current measurement */
 static const float ADC_REF_VOLTAGE = 3.3f;  /* ADC reference voltage (3.3V) */
@@ -217,7 +222,7 @@ static void poll_cell_temps_once(void)
  */
 static void refresh_fault_state(void)
 {
-  bmsFault = FAULT_check(&BMSCriticalInfo, &BMSConfig, BMS_STATUS); temporarily disable fault checking for bench testing
+  bmsFault = FAULT_check(&BMSCriticalInfo, &BMSConfig, BMS_STATUS);
 
   if (bmsFault) {
       HAL_GPIO_WritePin(BMS_FLT_EN_GPIO_Port, BMS_FLT_EN_Pin, GPIO_PIN_SET);
@@ -439,32 +444,17 @@ static void simulate_bms_data(void)
 {
   uint8_t i;
 
-  if ((simulation_tick > 0U) && ((simulation_tick % 50U) == 0U) &&
-      (simulated_cell_voltage_counts > 38900U)) {
-    simulated_cell_voltage_counts--;
-  }
-
-  simulated_temp_mC = (uint16_t)((int32_t)simulated_temp_mC + simulated_temp_step_mC);
-  if (simulated_temp_mC >= 27000U) {
-    simulated_temp_mC = 27000U;
-    simulated_temp_step_mC = -50;
-  } else if (simulated_temp_mC <= 25000U) {
-    simulated_temp_mC = 25000U;
-    simulated_temp_step_mC = 50;
-  }
-
+#if ENABLE_POST_BALANCE_SIMULATION
   for (i = 0U; i < NUM_USED_CELLS; i++) {
-    int32_t cell_temp_mC = (int32_t)simulated_temp_mC + ((int32_t)(i % 3U) * 100) - 100;
-
-    if (cell_temp_mC < 25000) {
-      cell_temp_mC = 25000;
-    } else if (cell_temp_mC > 27000) {
-      cell_temp_mC = 27000;
-    }
-
-    bmsData[i].voltage = simulated_cell_voltage_counts;
-    bmsData[i].temperature = (uint16_t)cell_temp_mC;
+    bmsData[i].voltage = sim_post_balance_voltage_counts[i];
+    bmsData[i].temperature = sim_april_26_temp_mC[i];
   }
+#else
+  for (i = 0U; i < NUM_USED_CELLS; i++) {
+    bmsData[i].voltage = sim_pre_balance_voltage_counts[i];
+    bmsData[i].temperature = sim_april_26_temp_mC[i];
+  }
+#endif
 
   setCriticalVoltages(&BMSCriticalInfo, bmsData);
   setCriticalTemps(&BMSCriticalInfo, bmsData);

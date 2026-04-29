@@ -29,6 +29,10 @@ Demo mode:
 python3 viewer/bms_viewer.py --demo
 ```
 
+For the April 26 balancing demo, set `ENABLE_POST_BALANCE_SIMULATION` in
+`bms_2025/Core/Src/main.c`: `0` streams pre-balancing data and `1` streams
+post-balancing data.
+
 UART simulation:
 
 ```bash
