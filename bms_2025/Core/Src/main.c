@@ -97,7 +97,7 @@ static const uint16_t sim_pre_balance_voltage_counts[NUM_USED_CELLS] = {
   37580U, 38200U, 38580U, 38000U, 38420U, 38300U
 };
 static const uint16_t sim_post_balance_voltage_counts[NUM_USED_CELLS] = {
-  38000U, 38010U, 38000U, 37990U, 38010U, 38000U
+  37600U, 37610U, 37600U, 37590U, 37610U, 37600U
 };
 static const uint16_t sim_april_26_temp_mC[NUM_USED_CELLS] = {
   29000U, 27500U, 28800U, 28000U, 27300U, 28700U
