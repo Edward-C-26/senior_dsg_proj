@@ -222,7 +222,7 @@ static void poll_cell_temps_once(void)
  */
 static void refresh_fault_state(void)
 {
-  bmsFault = FAULT_check(&BMSCriticalInfo, &BMSConfig, BMS_STATUS);
+  bmsFault = FAULT_check(&BMSCriticalInfo, &BMSConfig, BMS_STATUS); 
 
   if (bmsFault) {
       HAL_GPIO_WritePin(BMS_FLT_EN_GPIO_Port, BMS_FLT_EN_Pin, GPIO_PIN_SET);
