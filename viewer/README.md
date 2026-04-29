@@ -29,9 +29,10 @@ Demo mode:
 python3 viewer/bms_viewer.py --demo
 ```
 
-For the April 26 balancing demo, set `ENABLE_POST_BALANCE_SIMULATION` in
-`bms_2025/Core/Src/main.c`: `0` streams pre-balancing data and `1` streams
-post-balancing data.
+For STM UART testing, set `ENABLE_SENSOR_SIMULATION` in
+`bms_2025/Core/Src/main.c`: `1` streams simulated voltage/temperature data,
+and `0` uses the LTC6811 read path. With the LTC disconnected, the real read
+path reports 0 V cells and the viewer shows undervoltage faults.
 
 UART simulation:
 
