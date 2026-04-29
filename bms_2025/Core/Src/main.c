@@ -373,6 +373,15 @@ static uint16_t crc16_ccitt(const uint8_t *data, uint16_t length)
   return crc;
 }
 
+static uint16_t cell_voltage_counts_to_uart_mV(uint16_t cell_voltage_counts)
+{
+  if (cell_voltage_counts > INVALID_VOLTAGE_UPPER_THRESHOLD) {
+    return 0U;
+  }
+
+  return (uint16_t)(cell_voltage_counts / 10U);
+}
+
 // static void build_display_temperatures_cC(int16_t temp_display_cC[NUM_USED_CELLS])
 // {
 //   uint8_t i;
@@ -486,6 +495,7 @@ static void uart_send_bms_telemetry(void)
 
   BmsUartPacket_t packet;
   uint8_t packet_data[43];
+  uint32_t sanitized_pack_voltage_mV = 0U;
   uint8_t i;
 
   packet.sof1 = UART_BMS_PACKET_SOF1;
@@ -494,11 +504,16 @@ static void uart_send_bms_telemetry(void)
   packet.timestamp_ms = HAL_GetTick();
 
   for (i = 0U; i < NUM_USED_CELLS; i++) {
-    packet.cell_voltage_mV[i] = (uint16_t)((bmsData[i].voltage * 100U) / 1000U);
+    packet.cell_voltage_mV[i] = cell_voltage_counts_to_uart_mV(bmsData[i].voltage);
     packet.cell_temp_cC[i] = (int16_t)(bmsData[i].temperature / 10U);
+    sanitized_pack_voltage_mV += packet.cell_voltage_mV[i];
   }
 
-  packet.pack_voltage_mV = BMSCriticalInfo.cellMonitorPackVoltage;
+  if (sanitized_pack_voltage_mV > UINT16_MAX) {
+    packet.pack_voltage_mV = UINT16_MAX;
+  } else {
+    packet.pack_voltage_mV = (uint16_t)sanitized_pack_voltage_mV;
+  }
   BMSCriticalInfo.packCurrent = read_adc_shunt_current();
   packet.pack_current_deciA = (int16_t)(BMSCriticalInfo.packCurrent * 10.0f);
   (void)memcpy(packet.status, BMS_STATUS, sizeof(packet.status));
