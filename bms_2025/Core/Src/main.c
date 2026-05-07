@@ -56,8 +56,12 @@
 #define DEFAULT_CELL_IMBALANCE_LIMIT 150U
 
 #define UART_TX_PERIOD_MS            200U
+#define ENABLE_SENSOR_SIMULATION     1U
+#define ENABLE_UART_HELLO_TEST       0U
+#define ENABLE_LTC_ISOSPI_TEST       0U
 #define UART_BMS_PACKET_SOF1         0xAAU
 #define UART_BMS_PACKET_SOF2         0x55U
+#define UART_BMS_PACKET_LEN          40U
 
 /* USER CODE END PD */
 
@@ -76,11 +80,9 @@ volatile bool bmsFault = false;
 
 BMS_critical_info_t BMSCriticalInfo;
 static BMSConfigStructTypedef BMSConfig;
-UART_HandleTypeDef huart2;
 
 // Global variables for interrupt handlers and SPI communication
 SPI_HandleTypeDef* ltc_spi;
-SPI_HandleTypeDef* adc_spi;
 int16_t poll_cell_voltages = 0;
 int16_t poll_cell_temps = 0;
 int32_t fault_timer = 0;
@@ -89,18 +91,28 @@ static uint32_t last_voltage_poll_ms = 0U;
 static uint32_t last_temp_poll_ms = 0U;
 static uint32_t last_heartbeat_ms = 0U;
 static uint32_t last_uart_tx_ms = 0U;
+static uint32_t sensor_simulation_tick = 0U;
 
-/* Simulation variables for testing BMS viewer */
-static uint32_t simulation_tick = 0U;
-static const float VOLTAGE_BASE = 3.7f;    /* Base cell voltage in volts */
-static const float VOLTAGE_AMPLITUDE = 0.3f; /* Varies by +/-0.3V */
-static const float TEMP_BASE = 25.0f;      /* Base temperature in C */
-static const float TEMP_AMPLITUDE = 10.0f; /* Varies by +/-10C */
+static const uint16_t sim_cell_voltage_counts[NUM_USED_CELLS] = {
+  38000U, 38020U, 37980U, 38010U, 37990U, 38000U
+};
+static const uint16_t sim_cell_temp_mC[NUM_USED_CELLS] = {
+  28000U, 28100U, 27900U, 28000U, 28200U, 28100U
+};
+static const int16_t sim_voltage_wave_counts[16] = {
+  -50, -42, -35, -25, -12, 0, 12, 25, 35, 42, 50, 42, 35, 25, 12, 0
+};
+static const uint8_t sim_cell_wave_phase[NUM_USED_CELLS] = {
+  0U, 3U, 6U, 9U, 12U, 15U
+};
+static const int16_t sim_current_wave_centiA[16] = {
+  -2, -2, -1, -1, 0, 0, 1, 1, 2, 2, 1, 1, 0, 0, -1, -1
+};
 
 /* ADC configuration for INA shunt current measurement */
 static const float ADC_REF_VOLTAGE = 3.3f;  /* ADC reference voltage (3.3V) */
 static const float ADC_MAX_VALUE = 4095.0f; /* 12-bit ADC max value */
-static const float SHUNT_RESISTOR = 0.000001f;  /* Shunt resistor value in ohms */
+static const float SHUNT_RESISTOR = 0.001f;  /* Shunt resistor value in ohms (1 mΩ) */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -115,8 +127,12 @@ static void simulate_bms_data(void);
 static void poll_cell_temps_once(void);
 static void refresh_fault_state(void);
 static void handle_balancing(void);
-static void heartbeat_task(void);
 static float read_adc_shunt_current(void);
+static void ltc_isospi_test_task(void);
+static bool ltc_read_config_raw(bool addressed, uint8_t address, uint8_t rx_data[12]);
+static void uart_write_str(const char *text);
+static void uart_write_hex_byte(uint8_t value);
+static void uart_write_hex_buffer(const uint8_t *data, uint8_t length);
 
 /* USER CODE END PFP */
 
@@ -212,12 +228,106 @@ static void poll_cell_temps_once(void)
  */
 static void refresh_fault_state(void)
 {
-  // bmsFault = FAULT_check(&BMSCriticalInfo, &BMSConfig, BMS_STATUS); temporarily diable fault checking for testing without slave 
+  bmsFault = FAULT_check(&BMSCriticalInfo, &BMSConfig, BMS_STATUS); 
 
   if (bmsFault) {
       HAL_GPIO_WritePin(BMS_FLT_EN_GPIO_Port, BMS_FLT_EN_Pin, GPIO_PIN_SET);
   } else {
       HAL_GPIO_WritePin(BMS_FLT_EN_GPIO_Port, BMS_FLT_EN_Pin, GPIO_PIN_RESET);
+  }
+}
+
+static void ltc_isospi_test_task(void)
+{
+  uint8_t rx_broadcast[12] = {0};
+  uint8_t rx_addressed[12] = {0};
+  bool broadcast_ok;
+  bool addressed_ok;
+  static bool printed_header = false;
+
+  if (!printed_header) {
+      uart_write_str("LTC/isoSPI config read test\r\n");
+      uart_write_str("SPI mode: CPOL=1 CPHA=1, 1 Mbps\r\n");
+      printed_header = true;
+  }
+
+  wakeup_idle();
+  broadcast_ok = ltc_read_config_raw(false, BMSConfig.address[0], rx_broadcast);
+
+  wakeup_idle();
+  addressed_ok = ltc_read_config_raw(true, BMSConfig.address[0], rx_addressed);
+
+  uart_write_str("RDCFG broadcast: ");
+  uart_write_str(broadcast_ok ? "OK  rx=" : "FAIL rx=");
+  uart_write_hex_buffer(rx_broadcast, sizeof(rx_broadcast));
+  uart_write_str("\r\n");
+
+  uart_write_str("RDCFG addressed: ");
+  uart_write_str(addressed_ok ? "OK  rx=" : "FAIL rx=");
+  uart_write_hex_buffer(rx_addressed, sizeof(rx_addressed));
+  uart_write_str("\r\n");
+
+  HAL_Delay(500U);
+}
+
+static bool ltc_read_config_raw(bool addressed, uint8_t address, uint8_t rx_data[12])
+{
+  uint8_t cmd[12] = {0};
+  uint8_t pec_input[6];
+  uint16_t pec;
+
+  if (addressed) {
+      cmd[0] = (uint8_t)(0x80U | ((address << 3) & 0x78U) |
+                         ((ReadConfigurationRegisterGroup >> 8) & 0x07U));
+  } else {
+      cmd[0] = (uint8_t)((ReadConfigurationRegisterGroup >> 8) & 0x0FU);
+  }
+  cmd[1] = (uint8_t)(ReadConfigurationRegisterGroup & 0xFFU);
+
+  pec = calculatePEC(2U, cmd);
+  cmd[2] = (uint8_t)((pec >> 8) & 0xFFU);
+  cmd[3] = (uint8_t)(pec & 0xFFU);
+
+  (void)memset(rx_data, 0, 12U);
+  if (!SPIWriteRead(cmd, rx_data, 12U)) {
+      return false;
+  }
+
+  pec_input[0] = rx_data[4];
+  pec_input[1] = rx_data[5];
+  pec_input[2] = rx_data[6];
+  pec_input[3] = rx_data[7];
+  pec_input[4] = rx_data[8];
+  pec_input[5] = rx_data[9];
+
+  pec = calculatePEC(6U, pec_input);
+  return (pec == (uint16_t)(((uint16_t)rx_data[10] << 8) | rx_data[11]));
+}
+
+static void uart_write_str(const char *text)
+{
+  (void)HAL_UART_Transmit(&huart2, (uint8_t *)text, (uint16_t)strlen(text), 100U);
+}
+
+static void uart_write_hex_byte(uint8_t value)
+{
+  static const char hex[] = "0123456789ABCDEF";
+  uint8_t chars[2];
+
+  chars[0] = (uint8_t)hex[(value >> 4) & 0x0FU];
+  chars[1] = (uint8_t)hex[value & 0x0FU];
+  (void)HAL_UART_Transmit(&huart2, chars, sizeof(chars), 100U);
+}
+
+static void uart_write_hex_buffer(const uint8_t *data, uint8_t length)
+{
+  uint8_t i;
+
+  for (i = 0U; i < length; i++) {
+      if (i > 0U) {
+          uart_write_str(" ");
+      }
+      uart_write_hex_byte(data[i]);
   }
 }
 
@@ -274,30 +384,36 @@ static uint16_t crc16_ccitt(const uint8_t *data, uint16_t length)
   return crc;
 }
 
+static uint16_t cell_voltage_counts_to_uart_mV(uint16_t cell_voltage_counts)
+{
+  if (cell_voltage_counts > INVALID_VOLTAGE_UPPER_THRESHOLD) {
+    return 0U;
+  }
+
+  return (uint16_t)(cell_voltage_counts / 10U);
+}
+
 // static void build_display_temperatures_cC(int16_t temp_display_cC[NUM_USED_CELLS])
 // {
 //   uint8_t i;
 //   for (i = 0U; i < NUM_USED_CELLS; i++) {
-//     /* LTC6811 temperature is raw ADC count: 1 LSB = 0.75°C */
-//     temp_display_cC[i] = (int16_t)((bmsData[i].temperature * 75) / 100);
+//     temp_display_cC[i] = (int16_t)(bmsData[i].temperature / 10U);
 //   }
 // }
 
 /**
-  * @brief Read ADC1_IN2 (PA2) INA shunt resistor voltage and convert to current
+  * @brief Read ADC1_IN11 (PC1) INA output voltage and convert to current
   * @return Current in Amperes
-  * 
+  *
   * Conversion: I = V / R, where V is across shunt, R is shunt resistance
   */
 static float read_adc_shunt_current(void)
 {
   uint32_t adc_raw;
-  float shunt_voltage_v;
-  float current_ma;
-  float adc_shunt_reading_mv;
-  float adc_shunt_current_ma;
-  
-  /* Start ADC conversion on channel 1 (PA1) */
+  float shunt_voltage;
+  float current;
+
+  /* Start ADC conversion on channel 11 (PC1) */
   if (HAL_ADC_Start(&hadc1) != HAL_OK) {
     return 0.0f;
   }
@@ -315,7 +431,8 @@ static float read_adc_shunt_current(void)
   
   /* Convert raw ADC value to voltage across shunt resistor (in volts) */
   /* ADC_raw: 0-4095 maps to 0-3.3V */
-  shunt_voltage_v = (float)adc_raw * ADC_REF_VOLTAGE / ADC_MAX_VALUE;
+  shunt_voltage = (float)adc_raw * ADC_REF_VOLTAGE / ADC_MAX_VALUE - (ADC_REF_VOLTAGE / 2.0f); /* Center around 0V for bidirectional current */
+  shunt_voltage = shunt_voltage/50.0f;
   
   /* Store shunt voltage in mV for debugging/telemetry */
   adc_shunt_reading_mv = (uint16_t)(shunt_voltage_v * 1000.0f);
@@ -332,89 +449,79 @@ static float read_adc_shunt_current(void)
 }
 
 /**
-  * @brief Simulate varying BMS data for testing/verification
-  * Generates sine-wave varying cell voltages and temperatures
+  * @brief Simulate voltage and temperature while keeping current live.
+  *
+  * This mode is used when the LTC6811/isoSPI path is unavailable but UART
+  * packet formatting and the desktop viewer still need realistic cell data.
   */
 static void simulate_bms_data(void)
 {
+  uint8_t voltage_wave_index = (uint8_t)((sensor_simulation_tick / 2U) % 16U);
+  uint8_t current_wave_index = (uint8_t)((sensor_simulation_tick / 20U) % 16U);
+  int16_t current_centiA = (int16_t)(120 + sim_current_wave_centiA[current_wave_index]);
   uint8_t i;
-  float sine_value;
-  static const float PI = 3.14159265359f;
-  
-  /* Generate sine wave that cycles every ~10 seconds */
-  float phase = (2.0f * PI * (float)(simulation_tick % 50)) / 50.0f;
-  
-  /* Simple sine approximation using symmetry */
-  if (phase < PI) {
-    sine_value = 2.0f * phase / PI - 1.0f;
-  } else {
-    sine_value = 3.0f - 2.0f * phase / PI;
-  }
-  
-  /* Clip to [-1, 1] */
-  if (sine_value > 1.0f) sine_value = 1.0f;
-  if (sine_value < -1.0f) sine_value = -1.0f;
-  
-  /* Simulate 6 cell voltages varying around base voltage */
+
   for (i = 0U; i < NUM_USED_CELLS; i++) {
-    float cell_voltage = VOLTAGE_BASE + (VOLTAGE_AMPLITUDE * sine_value);
-    bmsData[i].voltage = (uint16_t)(cell_voltage * 10000.0f);  /* Store in 100uV units */
+    uint8_t cell_wave_index = (uint8_t)((voltage_wave_index + sim_cell_wave_phase[i]) % 16U);
+    int16_t voltage_offset_counts = sim_voltage_wave_counts[cell_wave_index];
+    bmsData[i].voltage = (uint16_t)((int32_t)sim_cell_voltage_counts[i] + voltage_offset_counts);
+    bmsData[i].temperature = sim_cell_temp_mC[i];
   }
-  
-  /* Simulate cell temperatures varying */
-  for (i = 0U; i < NUM_USED_CELLS; i++) {
-    float cell_temp = TEMP_BASE + (TEMP_AMPLITUDE * sine_value);
-    bmsData[i].temperature = (int16_t)(cell_temp * 100.0f) / 100;  /* Store in C */
-  }
-  
-  /* Simulate pack voltage (sum of cells) */
-  BMSCriticalInfo.isoAdcPackVoltage = (VOLTAGE_BASE * 6.0f) + (VOLTAGE_AMPLITUDE * 6.0f * sine_value);
-  
-  /* Read actual current from ADC1_IN2 (PA2) INA shunt resistor */
-  BMSCriticalInfo.packCurrent = read_adc_shunt_current();
-  
-  /* Set status to OK */
+
+  setCriticalVoltages(&BMSCriticalInfo, bmsData);
+  setCriticalTemps(&BMSCriticalInfo, bmsData);
+  BMSCriticalInfo.packCurrent = (float)current_centiA / 100.0f;
+
   (void)memset(BMS_STATUS, 0x00, sizeof(BMS_STATUS));
+  sensor_simulation_tick++;
 }
 
 static void uart_send_bms_telemetry(void)
 {
+#if ENABLE_UART_HELLO_TEST
+  static const uint8_t hello_msg[] = "hello\r\n";
+  (void)HAL_UART_Transmit(&huart2, (uint8_t *)hello_msg, (uint16_t)(sizeof(hello_msg) - 1U), 100U);
+#else
   typedef struct __attribute__((packed)) {
     uint8_t sof1;
     uint8_t sof2;
     uint8_t length;
     uint32_t timestamp_ms;
-    uint16_t cell_voltage_mV[6];
-    int16_t cell_temp_cC[6];
+    uint16_t cell_voltage_mV[NUM_USED_CELLS];
+    int16_t cell_temp_cC[NUM_USED_CELLS];
     uint16_t pack_voltage_mV;
-    int16_t pack_current_deciA;
+    int16_t pack_current_centiA;
     uint8_t status[6];
     uint16_t crc;
   } BmsUartPacket_t;
 
   BmsUartPacket_t packet;
   uint8_t packet_data[43];
+  uint32_t sanitized_pack_voltage_mV = 0U;
   uint8_t i;
 
   packet.sof1 = UART_BMS_PACKET_SOF1;
   packet.sof2 = UART_BMS_PACKET_SOF2;
-  packet.length = 37U;
+  packet.length = UART_BMS_PACKET_LEN;
   packet.timestamp_ms = HAL_GetTick();
 
   for (i = 0U; i < NUM_USED_CELLS; i++) {
-    /* LTC6811 voltage: 1 LSB = 100uV = 0.0001V, convert to mV */
-    packet.cell_voltage_mV[i] = (uint16_t)((bmsData[i].voltage * 100U) / 1000U);
+    packet.cell_voltage_mV[i] = cell_voltage_counts_to_uart_mV(bmsData[i].voltage);
+    packet.cell_temp_cC[i] = (int16_t)(bmsData[i].temperature / 10U);
+    sanitized_pack_voltage_mV += packet.cell_voltage_mV[i];
   }
 
-  /* Temperature array converted in-place */
-  for (i = 0U; i < NUM_USED_CELLS; i++) {
-    packet.cell_temp_cC[i] = (int16_t)((bmsData[i].temperature * 75) / 100);
+  if (sanitized_pack_voltage_mV > UINT16_MAX) {
+    packet.pack_voltage_mV = UINT16_MAX;
+  } else {
+    packet.pack_voltage_mV = (uint16_t)sanitized_pack_voltage_mV;
   }
-
-  /* Pack voltage: convert from float volts to mV */
-  packet.pack_voltage_mV = (uint16_t)(BMSCriticalInfo.isoAdcPackVoltage * 1000.0f);
-  packet.pack_current_deciA = (int16_t)(BMSCriticalInfo.packCurrent * 10.0f);
-
+#if ENABLE_SENSOR_SIMULATION
+  packet.pack_current_centiA = (int16_t)(BMSCriticalInfo.packCurrent * 100.0f);
+#else
+  BMSCriticalInfo.packCurrent = read_adc_shunt_current();
+  packet.pack_current_centiA = (int16_t)(BMSCriticalInfo.packCurrent * 100.0f);
+#endif
   (void)memcpy(packet.status, BMS_STATUS, sizeof(packet.status));
 
   packet_data[0] = packet.sof1;
@@ -438,32 +545,18 @@ static void uart_send_bms_telemetry(void)
 
   packet_data[31U] = (uint8_t)((packet.pack_voltage_mV >> 0U) & 0xFFU);
   packet_data[32U] = (uint8_t)((packet.pack_voltage_mV >> 8U) & 0xFFU);
-  packet_data[33U] = (uint8_t)((packet.pack_current_deciA >> 0U) & 0x00FF);
-  packet_data[34U] = (uint8_t)((packet.pack_current_deciA >> 8U) & 0x00FF);
-
+  packet_data[33U] = (uint8_t)((packet.pack_current_centiA >> 0U) & 0xFFU);
+  packet_data[34U] = (uint8_t)((packet.pack_current_centiA >> 8U) & 0xFFU);
   (void)memcpy(&packet_data[35U], packet.status, 6U);
 
   packet.crc = crc16_ccitt(packet_data, 41U);
   packet_data[41U] = (uint8_t)((packet.crc >> 0U) & 0xFFU);
   packet_data[42U] = (uint8_t)((packet.crc >> 8U) & 0xFFU);
 
-  (void)HAL_UART_Transmit(&huart2, (uint8_t *)packet_data, 43U, 100U);
-}
+  (void)HAL_UART_Transmit(&huart2, packet_data, sizeof(packet_data), 100U);
 
-static void MX_USART2_UART_Init(void)
-{
-    huart2.Instance = USART2;
-    huart2.Init.BaudRate = 115200;
-    huart2.Init.WordLength = UART_WORDLENGTH_8B;
-    huart2.Init.StopBits = UART_STOPBITS_1;
-    huart2.Init.Parity = UART_PARITY_NONE;
-    huart2.Init.Mode = UART_MODE_TX_RX;
-    huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-    huart2.Init.OverSampling = UART_OVERSAMPLING_16;
 
-    if (HAL_UART_Init(&huart2) != HAL_OK) {
-        Error_Handler();
-    }
+#endif
 }
 
 /* USER CODE END 0 */
@@ -498,18 +591,15 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_SPI1_Init();
-  MX_TIM3_Init();
+  MX_TIM2_Init();
   MX_TIM1_Init();
   MX_TIM7_Init();
   MX_TIM13_Init();
-  MX_USART1_UART_Init();
+  MX_USART2_UART_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
   // Initialize ltc_spi to point to appropriate SPI handle (SPI1 is used for LTC6811)
   ltc_spi = &hspi1;
-  
-  // Initialize adc_spi to point to appropriate SPI handle (SPI3 is used for ADC)
-  adc_spi = &hspi3;
   
   initPECTable();
   loadConfig(&BMSConfig);
@@ -519,13 +609,13 @@ int main(void)
   (void)memset(BMS_STATUS, 0, sizeof(BMS_STATUS));
   (void)memset(bmsData, 0, sizeof(bmsData));
 
-  writeConfigAll(&BMSConfig);
+  /* Normal BMS config write disabled during LTC/isoSPI communication test. */
+  /* writeConfigAll(&BMSConfig); */
 
   last_voltage_poll_ms = HAL_GetTick();
   last_temp_poll_ms = HAL_GetTick();
   last_heartbeat_ms = HAL_GetTick();
 
-  MX_USART2_UART_Init();
   last_uart_tx_ms = HAL_GetTick();
   /* USER CODE END 2 */
 
@@ -536,8 +626,19 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+#if ENABLE_LTC_ISOSPI_TEST
+    ltc_isospi_test_task();
+#else
     uint32_t now_ms = HAL_GetTick();
 
+#if ENABLE_SENSOR_SIMULATION
+    if ((now_ms - last_voltage_poll_ms) >= VOLTAGE_POLL_PERIOD_MS) {
+      simulate_bms_data();
+      refresh_fault_state();
+      last_voltage_poll_ms = now_ms;
+      last_temp_poll_ms = now_ms;
+    }
+#else
     if ((now_ms - last_voltage_poll_ms) >= VOLTAGE_POLL_PERIOD_MS) {
       poll_cell_voltages_once();
       last_voltage_poll_ms = now_ms;
@@ -550,6 +651,7 @@ int main(void)
 
     refresh_fault_state();
     handle_balancing();
+#endif
 
     if ((now_ms - last_heartbeat_ms) >= HEARTBEAT_PERIOD_MS) {
       // heartbeat_task();
@@ -557,15 +659,10 @@ int main(void)
     }
 
     if ((now_ms - last_uart_tx_ms) >= UART_TX_PERIOD_MS) {
-      /* Read ADC1 shunt current at 200Hz (5ms period) */
-      BMSCriticalInfo.packCurrent = read_adc_shunt_current();
-      
-      // simulate_bms_data();  /* Simulate varying voltage/temperature for testing */
       uart_send_bms_telemetry();
       last_uart_tx_ms = now_ms;
     }
-
-    simulation_tick++;
+#endif
   }
   /* USER CODE END 3 */
 }

@@ -84,3 +84,5 @@ latex
 # Build artifacts
 Debug/
 Release/
+
+viewer/=*

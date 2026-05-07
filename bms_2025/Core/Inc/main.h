@@ -68,7 +68,7 @@ extern int32_t fault_timer;
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define BMS_FLT_EN_Pin GPIO_PIN_13
+#define BMS_FLT_EN_Pin GPIO_PIN_4
 #define BMS_FLT_EN_GPIO_Port GPIOC
 #define SPI_UCOMM_CS_Pin GPIO_PIN_4
 #define SPI_UCOMM_CS_GPIO_Port GPIOA
@@ -78,12 +78,12 @@ extern int32_t fault_timer;
 #define SPI_UCOMM_MISO_GPIO_Port GPIOA
 #define SPI_UCOMM_MOSI_Pin GPIO_PIN_7
 #define SPI_UCOMM_MOSI_GPIO_Port GPIOA
-#define LV_PWR_MONITOR_Pin GPIO_PIN_4
-#define LV_PWR_MONITOR_GPIO_Port GPIOC
 #define SWDIO_TC_Pin GPIO_PIN_13
 #define SWDIO_TC_GPIO_Port GPIOA
 #define SWCLK_TC_Pin GPIO_PIN_14
 #define SWCLK_TC_GPIO_Port GPIOA
+#define IMD_DIAGNOSTIC_Pin GPIO_PIN_3
+#define IMD_DIAGNOSTIC_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

@@ -8,7 +8,6 @@
 
 #define MAXINT16 65535
 
-extern uint8_t balance_counter;
 void setCriticalVoltages(BMS_critical_info_t *bms,
         CellData const bmsData[NUM_CELLS]);
 void setCriticalTemps(BMS_critical_info_t *bms, CellData const bmsData[NUM_CELLS]);
