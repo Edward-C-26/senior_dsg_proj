@@ -13,10 +13,12 @@ I updated the IOC configuration in STM32CubeMX to simplify communication. After 
 ## April 6, 2026
 
 I fixed several pin assignments in the IOC that were causing conflicts with other peripherals. I then added voltage and temperature simulation capabilities to allow testing of the BMS logic without requiring hardware. I temporarily disabled fault handling to make debugging easier. Finally, I added additional ADC pins to the IOC configuration for reading analog sensors such as current and auxiliary inputs.
+![The final pinout design for the stm on pcb](cube_img.png)
 
 ## April 16, 2026
 
-I initiated a new IOC configuration for the STM32F1 Nucleo board as an alternative hardware target for the BMS system.
+I initiated a new IOC configuration for the STM32F1 Nucleo board as an alternative hardware target for the BMS system before our actual STM is in working configuration.
+
 
 ## April 21, 2026
 
@@ -24,11 +26,12 @@ I updated the git ignore file to exclude build artifacts and IDE files from the 
 
 ## April 26, 2026
 
-I resolved all remaining compilation issues, and the code now builds without any errors.
+I resolved all remaining compilation issues, and the code now builds without any errors. We confirmed the attachment of the stm on the pcb to the computer through ST-link with the STM Programmer and STM CUBE IDE when flashing.
+![Connection confirmation on programmer](programmer.png)
 
 ## April 27, 2026
 
-I merged the Nucleo code from the `stmuart_bridge` branch to integrate UART bridge functionality into the main firmware. I then refined the shunt measurement code by adjusting gain and offset calculations and improving noise filtering on the ADC readings. I also changed the LTC battery cell monitor communication to use SPI Mode 3 for proper timing.
+I merged the Nucleo code from the `stmuart_bridge` branch to integrate UART bridge functionality into the main firmware. I then refined the shunt measurement code by adjusting gain and offset calculations and improving noise filtering on the ADC readings. I also changed the LTC battery cell monitor communication to use SPI Mode 3 for proper timing. During the same time we used oscilloscope to ensure correct spi communication was established between the STM chip and the LTC6820.
 
 ## April 28, 2026
 
