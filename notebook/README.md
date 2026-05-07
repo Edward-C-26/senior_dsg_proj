@@ -22,6 +22,7 @@ I fixed several pin assignments in the IOC that were causing conflicts with othe
 ## April 16, 2026
 
 I initiated a new IOC configuration for the STM32F1 Nucleo board as an alternative hardware target for the BMS system before our actual STM is in working configuration. We were successfully able to demonstrate a working charge counting algorithm on the dev board.
+![The ina240 design is confirmed and soldered onto the main pcb](ina240.png)
 
 
 ## April 21, 2026
