@@ -33,13 +33,3 @@ I merged the Nucleo code from the `stmuart_bridge` branch to integrate UART brid
 ## April 28, 2026
 
 I re-enabled fault handling after completing debugging, so the system now responds to overcurrent, overvoltage, and overtemperature conditions. I also uncommented a previously commented section of code that contained critical initialization instructions.
-
-## April 29, 2026
-
-I had no commits on this date.
-
----
-
-## Notes
-
-I will add more photos and physical hardware progress updates later as I continue assembling and testing the scooter BMS system.
